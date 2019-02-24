@@ -2166,7 +2166,6 @@ static NDIS_STATUS AndesMTLoadFwMethod1(RTMP_ADAPTER *ad)
 	UINT32 value, loop, dl_len;
 	UINT32 ret;
 	RTMP_CHIP_CAP *cap = &ad->chipCap;
-	POS_COOKIE obj = (POS_COOKIE)ad->OS_Cookie;
 	struct MCU_CTRL *Ctl = &ad->MCUCtrl;
 
 	if (cap->load_code_method == BIN_FILE_METHOD) {

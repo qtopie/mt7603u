@@ -46,103 +46,6 @@ static VOID mt7603_bbp_adjust(RTMP_ADAPTER *pAd)
 #endif /* DOT11_N_SUPPORT */
 }
 
-static void mt7603_tx_pwr_gain(RTMP_ADAPTER *pAd, UINT8 channel)
-{
-	UINT32 value;
-	CHAR tx_0_pwr;
-	struct MT_TX_PWR_CAP *cap = &pAd->chipCap.MTTxPwrCap;
-
-
-	tx_0_pwr = cap->tx_0_target_pwr_g_band;
-	tx_0_pwr += cap->tx_0_chl_pwr_delta_g_band[get_low_mid_hi_index(channel)];
-
-	RTMP_IO_READ32(pAd, TMAC_FP0R0, &value);
-
-	value &= ~LG_OFDM0_FRAME_POWER0_DBM_MASK;
-	value |= LG_OFDM0_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_g_band_ofdm_6_9);
-
-	value &= ~LG_OFDM1_FRAME_POWER0_DBM_MASK;
-	value |= LG_OFDM1_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_g_band_ofdm_12_18);
-
-	value &= ~LG_OFDM2_FRAME_POWER0_DBM_MASK;
-	value |= LG_OFDM2_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_g_band_ofdm_24_36);
-
-	value &= ~LG_OFDM3_FRAME_POWER0_DBM_MASK;
-	value |= LG_OFDM3_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_g_band_ofdm_48);
-
-	RTMP_IO_WRITE32(pAd, TMAC_FP0R0, value);
-
-	RTMP_IO_READ32(pAd, TMAC_FP0R1, &value);
-
-	value &= ~HT20_0_FRAME_POWER0_DBM_MASK;
-	value |= HT20_0_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_bpsk_mcs_0_8);
-
-	value &= ~HT20_1_FRAME_POWER0_DBM_MASK;
-	value |= HT20_1_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_qpsk_mcs_1_2_9_10);
-
-	value &= ~HT20_2_FRAME_POWER0_DBM_MASK;
-	value |= HT20_2_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_16qam_mcs_3_4_11_12);
-
-	value &= ~HT20_3_FRAME_POWER0_DBM_MASK;
-	value |= HT20_3_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_64qam_mcs_5_13);
-
-	RTMP_IO_WRITE32(pAd, TMAC_FP0R1, value);
-
-	RTMP_IO_READ32(pAd, TMAC_FP0R2, &value);
-
-	value &= ~HT40_0_FRAME_POWER0_DBM_MASK;
-	value |= HT40_0_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_bpsk_mcs_0_8
-											+ cap->delta_tx_pwr_bw40_g_band);
-
-	value &= ~HT40_1_FRAME_POWER0_DBM_MASK;
-	value |= HT40_1_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_qpsk_mcs_1_2_9_10
-											+ cap->delta_tx_pwr_bw40_g_band);
-
-	value &= ~HT40_2_FRAME_POWER0_DBM_MASK;
-	value |= HT40_2_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_16qam_mcs_3_4_11_12
-											+ cap->delta_tx_pwr_bw40_g_band);
-
-	value &= ~HT40_3_FRAME_POWER0_DBM_MASK;
-	value |= HT40_3_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_64qam_mcs_5_13
-											+ cap->delta_tx_pwr_bw40_g_band);
-
-	RTMP_IO_WRITE32(pAd, TMAC_FP0R2, value);
-
-	RTMP_IO_READ32(pAd, TMAC_FP0R3, &value);
-
-	value &= ~CCK0_FRAME_POWER0_DBM_MASK;
-	value |= CCK0_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_cck_1_2);
-
-	value &= ~LG_OFDM4_FRAME_POWER0_DBM_MASK;
-	value |= LG_OFDM4_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_g_band_ofdm_54);
-
-	value &= ~CCK1_FRAME_POWER0_DBM_MASK;
-	value |= CCK1_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_cck_5_11);
-
-	value &= ~HT40_6_FRAME_POWER0_DBM_MASK;
-	value |= HT40_6_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_bpsk_mcs_32 + cap->delta_tx_pwr_bw40_g_band);
-
-	RTMP_IO_WRITE32(pAd, TMAC_FP0R3, value);
-
-	RTMP_IO_READ32(pAd, TMAC_FP0R4, &value);
-
-	value &= ~HT20_4_FRAME_POWER0_DBM_MASK;
-	value |= HT20_4_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_64qam_mcs_6_14);
-
-	value &= ~HT20_5_FRAME_POWER0_DBM_MASK;
-	value |= HT20_5_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_64qam_mcs_7_15);
-
-	value &= ~HT40_4_FRAME_POWER0_DBM_MASK;
-	value |= HT40_4_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_64qam_mcs_6_14
-												+ cap->delta_tx_pwr_bw40_g_band);
-
-	value &= ~HT40_5_FRAME_POWER0_DBM_MASK;
-	value |= HT40_5_FRAME_POWER0_DBM(tx_0_pwr + cap->tx_pwr_ht_64qam_mcs_7_15
-												+ cap->delta_tx_pwr_bw40_g_band);
-
-	RTMP_IO_WRITE32(pAd, TMAC_FP0R4, value);
-}
-
 
 static void mt7603_switch_channel(RTMP_ADAPTER *pAd, UCHAR channel, BOOLEAN scan)
 {
@@ -201,9 +104,7 @@ static INT asic_set_tmac_info_template(RTMP_ADAPTER *pAd)
 		UINT32 dw[5];
 		TMAC_TXD_2 *dw2 = (TMAC_TXD_2 *)(&dw[0]);
 		TMAC_TXD_3 *dw3 = (TMAC_TXD_3 *)(&dw[1]);
-		TMAC_TXD_4 *dw4 = (TMAC_TXD_4 *)(&dw[2]);
 		TMAC_TXD_5 *dw5 = (TMAC_TXD_5 *)(&dw[3]);
-		TMAC_TXD_6 *dw6 = (TMAC_TXD_6 *)(&dw[4]);
 
 		NdisZeroMemory((UCHAR *)(&dw[0]), sizeof(dw));
 

@@ -68,4 +68,5 @@ Support:
 	4. merge ATE code request by Gemtek
 
 ## Reference 
-https://github.com/kuba-moo/mt7601u
+* https://github.com/kuba-moo/mt7601u
+* https://github.com/jurobystricky/Netgear-A6210

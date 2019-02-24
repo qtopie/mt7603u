@@ -303,22 +303,6 @@ UINT32 AndesQueueLen(struct MCU_CTRL *ctl, DL_LIST *list)
 }
 
 
-static INT32 AndesQueueEmpty(struct MCU_CTRL *ctl, DL_LIST *list)
-{
-	unsigned long flags;
-	int is_empty;
-	NDIS_SPIN_LOCK *lock;
-
-	lock = AndesGetSpinLock(ctl, list);
-
-	RTMP_SPIN_LOCK_IRQSAVE(lock, &flags);
-	is_empty = DlListEmpty(list);
-	RTMP_SPIN_UNLOCK_IRQRESTORE(lock, &flags);
-
-	return is_empty;
-}
-
-
 static VOID AndesQueueInit(struct MCU_CTRL *ctl, DL_LIST *list)
 {
 

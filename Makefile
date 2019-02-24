@@ -87,7 +87,7 @@ endif
 
 
 ifeq ($(PLATFORM),PC)
-# Linux 2.6
+# Linux 2.6+
 LINUX_SRC = /lib/modules/$(shell uname -r)/build
 # Linux 2.4 Change to your local setting
 #LINUX_SRC = /usr/src/linux-2.4

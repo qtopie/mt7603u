@@ -1,4 +1,20 @@
+tools/bin2h
+tools/plug_in/Module.symvers
+tools/plug_in/.cache.mk
+os/linux/.cache.mk
+os/
+
+# build files
+**/*.o
+**/*.o.ur-safe
+
 # vim files
-*~
-*.swp
-*.swo
+**/*~
+**/*.swp
+**/*.swo
+
+# IDE files
+.vscode/
+
+# misc
+original-codes.zip

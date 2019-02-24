@@ -1179,7 +1179,6 @@ VOID APCheckBcnQHandler(RTMP_ADAPTER *pAd, INT apidx, BOOLEAN *is_pretbtt_int)
  */
 VOID AsicDisableSync(RTMP_ADAPTER *pAd)
 {
-	int i;
 	UINT32  value;
 #ifdef CONFIG_AP_SUPPORT
 	INT32 IdBss, MaxNumBss = pAd->ApCfg.BssidNum;
@@ -2875,7 +2874,6 @@ VOID AsicUpdateBASession(RTMP_ADAPTER *pAd, UCHAR wcid, UCHAR tid, UINT16 sn, UC
 VOID AsicUpdateRxWCIDTable(RTMP_ADAPTER *pAd, USHORT WCID, UCHAR *pAddr)
 {
 	struct wtbl_entry tb_entry;
-    struct wtbl_2_struc *wtbl_2;
 	union WTBL_1_DW0 *dw0 = (union WTBL_1_DW0 *)&tb_entry.wtbl_1.wtbl_1_d0.word;
 	union WTBL_1_DW1 *dw1 = (union WTBL_1_DW1 *)&tb_entry.wtbl_1.wtbl_1_d1.word;
 	union WTBL_1_DW2 *dw2 = (union WTBL_1_DW2 *)&tb_entry.wtbl_1.wtbl_1_d2.word;
@@ -3205,7 +3203,6 @@ IRQL = DISPATCH_LEVEL
  */
 VOID AsicDelWcidTab(RTMP_ADAPTER *pAd, UCHAR wcid_idx)
 {
-    UINT32 offset;
     UCHAR cnt, cnt_s, cnt_e;
     struct wtbl_entry tb_entry;
     UCHAR WaitCnt = 0;
@@ -6194,59 +6191,6 @@ static CHAR *dma_sch_str[] = {
 #define MAX_MCUCMD_SIZE	4096 /*must >= MAX_DATA_SIZE */
 #define MAX_DATA_SIZE		1792 /* 0xe*128=1792 */
 #define MAX_AMSDU_DATA_SIZE	4096
-static INT32 SetResrvPage(RTMP_ADAPTER *pAd, UINT page_size)
-{
-	UINT32 max_beacon_page_count = MAX_BEACON_SIZE/page_size;
-	UINT32 max_bmcast_page_count = MAX_BMCAST_SIZE/page_size;
-	UINT32 max_mcucmd_page_count = MAX_MCUCMD_SIZE/page_size;
-	UINT32 max_data_page_count = MAX_DATA_SIZE/page_size;
-	UINT32 Total_page_count = 0;
-
-	DBGPRINT(RT_DEBUG_TRACE,("%s -->AMSDU: %d\n",__FUNCTION__,pAd->CommonCfg.BACapability.field.AmsduEnable));
-
-	if(pAd->CommonCfg.BACapability.field.AmsduEnable==TRUE)
-	{
-		max_data_page_count = MAX_AMSDU_DATA_SIZE/page_size;
-	}
-
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_0, max_data_page_count);
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_1, max_data_page_count);
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_2, max_data_page_count);
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_3, max_data_page_count);
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_4, max_data_page_count);
-	Total_page_count += max_data_page_count*5;
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_5, max_mcucmd_page_count);
-	Total_page_count += max_mcucmd_page_count;
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_6, max_data_page_count);
-//	Total_page_count += max_data_page_count;
-#ifdef CONFIG_AP_SUPPORT
-	if (pAd->ApCfg.BssidNum  > 1)
-	{
-		RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_7, (max_beacon_page_count*(pAd->ApCfg.BssidNum - 1) + max_data_page_count));
-		Total_page_count += (max_beacon_page_count*(pAd->ApCfg.BssidNum - 1) + max_data_page_count);
-	} else {
-		RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_7, max_data_page_count);
-		Total_page_count += max_data_page_count;
-	}
-#endif /* CONFIG_AP_SUPPORT */
-#ifdef CONFIG_STA_SUPPORT
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_7, max_data_page_count);
-	Total_page_count += max_data_page_count;
-#endif /* CONFIG_STA_SUPPORT */
-	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_8, (max_bmcast_page_count*MAX_BMCAST_COUNT + max_data_page_count));
-	Total_page_count += (max_bmcast_page_count*MAX_BMCAST_COUNT + max_data_page_count);
-/* For MCC use */
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_9, max_data_page_count);
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_10, max_data_page_count);
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_11, max_data_page_count);
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_12, max_data_page_count);
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_13, max_data_page_count);
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_14, max_data_page_count);
-//	RTMP_IO_WRITE32(pAd, MT_PAGE_CNT_15, max_data_page_count);
-//	Total_page_count += max_data_page_count*7;
-
-	return Total_page_count;
-}
 
 
 /*

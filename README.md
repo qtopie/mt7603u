@@ -8,16 +8,10 @@ sudo apt install libelf-dev
 make && sudo make install
 ```
 
-Test it:
-```
-insmod mt7603u_sta
-depmod
-```
-
 You may also want to update existing old driver:
 ```
 rmmod mt7603u*
-insmod mt7603u
+sudo make install
 depmod
 ```
 
