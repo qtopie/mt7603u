@@ -15,12 +15,7 @@
 
     Module Name:
     rtusb_dev_id.c
-
-    Abstract:
-
-    Revision History:
-    Who        When          What
-    ---------  ----------    ----------------------------------------------
+   
  */
 
 #define RTMP_MODULE_OS
@@ -35,6 +30,7 @@ USB_DEVICE_ID rtusb_dev_id[] = {
 
 #ifdef MT7603
 	{USB_DEVICE(0x0E8D,0x7603)},
+   {USB_DEVICE(0x0E8D,0x760c)},
 #endif
 	{ }/* Terminating entry */
 };
