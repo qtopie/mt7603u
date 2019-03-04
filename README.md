@@ -1,6 +1,5 @@
 # MT7603U driver
-**Warning: there are still many bugs in this project, and welcome to join me
-to improve it.**
+**Warning: there are still many bugs in this project, and welcome to improve it.**
 
 ## Build and Install
 ```bash
