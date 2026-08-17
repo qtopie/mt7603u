@@ -7,6 +7,10 @@
 #include <net/mac80211.h>
 #include "mt7603u_rust.h"
 
+static bool mt7603_dbg_rx;
+module_param(mt7603_dbg_rx, bool, 0644);
+MODULE_PARM_DESC(mt7603_dbg_rx, "Enable verbose per-frame RX logging (default off)");
+
 #define MT7603_NUM_RX_URBS 4
 #define MT7603_EEPROM_SIZE 1024
 #define MT7603_RX_BUF_SIZE 24576
@@ -37,6 +41,8 @@ struct mt7603u_dev {
     struct urb *cmd_urb;
     void *cmd_buf;
     struct usb_anchor tx_anchor;
+    struct work_struct assoc_work;
+    u8 assoc_bssid[ETH_ALEN];
 };
 
 static void mt7603_cmd_rsp_complete(struct urb *urb)
@@ -58,14 +64,15 @@ static void mt7603_rx_complete(struct urb *urb)
     struct mt7603_rx_urb *rx_entry = urb->context;
     struct mt7603u_dev *dev = rx_entry->dev;
 
-    pr_info("mt7603u: RX callback fired: status=%d, actual_len=%d\n",
-            urb->status, urb->actual_length);
+    if (mt7603_dbg_rx)
+        pr_info("mt7603u: RX callback fired: status=%d, actual_len=%d\n",
+                urb->status, urb->actual_length);
 
     if (urb->status != 0 && urb->status != -ENOENT && urb->status != -ESHUTDOWN && urb->status != -ECONNRESET) {
         pr_warn("mt7603u: RX urb status error: %d\n", urb->status);
     }
 
-    if (urb->status == 0 && urb->actual_length > 0) {
+    if (mt7603_dbg_rx && urb->status == 0 && urb->actual_length > 0) {
         pr_info("mt7603u: RX urb complete: len=%d, first=0x%02x\n",
                 urb->actual_length, ((u8 *)urb->transfer_buffer)[0]);
     }
@@ -84,13 +91,15 @@ static void mt7603_rx_complete(struct urb *urb)
                 break;
             }
 
-            pr_info_ratelimited("mt7603u: RX parse: ret=%d pkt_len=%d hdr_len=%d crc=%d pkt_type=0x%x byte_cnt=%d\n",
-                                ret, rx_info.pkt_len, rx_info.hdr_len,
-                                rx_info.is_crc_error, (frame_ptr[3] >> 5) & 0x07, rx_byte_cnt);
+            if (mt7603_dbg_rx)
+                pr_info_ratelimited("mt7603u: RX parse: ret=%d pkt_len=%d hdr_len=%d crc=%d pkt_type=0x%x byte_cnt=%d\n",
+                                    ret, rx_info.pkt_len, rx_info.hdr_len,
+                                    rx_info.is_crc_error, (frame_ptr[3] >> 5) & 0x07, rx_byte_cnt);
 
             if (rx_info.pkt_len >= 2 && rx_info.pkt_len <= 60 && rx_info.is_crc_error == 0) {
                 size_t off = rx_info.hdr_len;
-                pr_info("mt7603u: SHORTFRAME dump: pkt_len=%d fc=0x%04x addr1=%pM addr2=%pM addr3=%pM raw="
+                if (mt7603_dbg_rx)
+                    pr_info("mt7603u: SHORTFRAME dump: pkt_len=%d fc=0x%04x addr1=%pM addr2=%pM addr3=%pM raw="
                         "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
                         rx_info.pkt_len,
                         (u16)(frame_ptr[off] | (frame_ptr[off+1] << 8)),
@@ -116,10 +125,10 @@ static void mt7603_rx_complete(struct urb *urb)
                     u8 *hdr = frame_ptr + offset;
                     u16 fc = hdr[0] | (hdr[1] << 8);
 
-                    if ((fc & 0x00FC) == 0x0080 && payload_len >= 24) {
+                    if (mt7603_dbg_rx && (fc & 0x00FC) == 0x0080 && payload_len >= 24) {
                         pr_info("mt7603u: BEACON FRAME RECEIVED! BSSID=%pM, ch=%u, len=%zu, rssi=%d dBm\n",
                                 &hdr[16], dev->current_channel, payload_len, rx_info.rssi);
-                    } else if ((fc & 0x000C) == 0x0008 && payload_len >= 24) {
+                    } else if (mt7603_dbg_rx && (fc & 0x000C) == 0x0008 && payload_len >= 24) {
                         /* Data frame: log type (0x2) / subtype and addrs */
                         pr_info("mt7603u: DATA FRAME RX! fc=0x%04x subtype=%d len=%zu da=%pM sa=%pM bssid=%pM\n",
                                 fc, (fc >> 4) & 0x0F, payload_len,
@@ -136,8 +145,12 @@ static void mt7603_rx_complete(struct urb *urb)
                         status->band = NL80211_BAND_2GHZ;
                         status->freq = 2407 + (dev->current_channel ? dev->current_channel : 1) * 5;
                         status->chains = BIT(0);
-                        /* RSSI from Group3 RxVector IBRssi0 (dBm). 0 = unknown. */
-                        status->chain_signal[0] = status->signal = rx_info.rssi ? (int)rx_info.rssi * 100 : 0;
+                        if (rx_info.rssi != 0) {
+                            status->signal = rx_info.rssi;
+                            status->chain_signal[0] = rx_info.rssi;
+                        } else {
+                            status->flag |= RX_FLAG_NO_SIGNAL_VAL;
+                        }
 
                         ieee80211_rx(dev->hw, skb);
                     }
@@ -453,6 +466,31 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
     if (changed & (BSS_CHANGED_BSSID | BSS_CHANGED_ASSOC)) {
         pr_info("mt7603u: BSSID/ASSOC changed to %pM (assoc=%d)\n", bssid, vif ? vif->cfg.assoc : -1);
         if (bssid && !is_zero_ether_addr(bssid) && (vif ? vif->cfg.assoc : 1)) {
+            struct cfg80211_bss *bss_entry = cfg80211_get_bss(hw->wiphy, NULL, bssid, NULL, 0,
+                                                               IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
+            if (bss_entry) {
+                if (bss_entry->channel && bss_entry->channel->hw_value != dev->current_channel) {
+                    pr_info("mt7603u: BSS scan cache hit for %pM: tuning to channel %d (%d MHz)\n",
+                            bssid, bss_entry->channel->hw_value, bss_entry->channel->center_freq);
+                    mt7603_set_channel(dev, bss_entry->channel->hw_value);
+                }
+                cfg80211_put_bss(hw->wiphy, bss_entry);
+            } else if (info && info->bss && info->bss->channel) {
+                u8 ch = info->bss->channel->hw_value;
+                if (ch != dev->current_channel) {
+                    pr_info("mt7603u: bss_info_changed: tuning to channel %d (%d MHz)\n",
+                            ch, info->bss->channel->center_freq);
+                    mt7603_set_channel(dev, ch);
+                }
+            } else if (vif && vif->bss_conf.bss && vif->bss_conf.bss->channel) {
+                u8 ch = vif->bss_conf.bss->channel->hw_value;
+                if (ch != dev->current_channel) {
+                    pr_info("mt7603u: bss_info_changed: tuning to vif channel %d (%d MHz)\n",
+                            ch, vif->bss_conf.bss->channel->center_freq);
+                    mt7603_set_channel(dev, ch);
+                }
+            }
+
             u32 lo = (u32)bssid[0] | ((u32)bssid[1] << 8) |
                      ((u32)bssid[2] << 16) | ((u32)bssid[3] << 24);
             u32 hi = (u32)bssid[4] | ((u32)bssid[5] << 8) | BIT(16);
@@ -483,9 +521,49 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
 
 
 
+static void mt7603_assoc_work(struct work_struct *work)
+{
+    struct mt7603u_dev *dev = container_of(work, struct mt7603u_dev, assoc_work);
+    struct reg_write_op ops[32];
+    size_t written = 0;
+    u8 bssid[ETH_ALEN];
+    u32 lo, hi;
+
+    memcpy(bssid, dev->assoc_bssid, ETH_ALEN);
+    if (is_zero_ether_addr(bssid) || is_broadcast_ether_addr(bssid))
+        return;
+
+    struct cfg80211_bss *bss = cfg80211_get_bss(dev->hw->wiphy, NULL, bssid, NULL, 0,
+                                                IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
+    if (bss) {
+        if (bss->channel && bss->channel->hw_value != dev->current_channel) {
+            pr_info("mt7603u: assoc_work: tuning to channel %d (%d MHz)\n",
+                    bss->channel->hw_value, bss->channel->center_freq);
+            mt7603_set_channel(dev, bss->channel->hw_value);
+        }
+        cfg80211_put_bss(dev->hw->wiphy, bss);
+    }
+
+    lo = (u32)bssid[0] | ((u32)bssid[1] << 8) |
+         ((u32)bssid[2] << 16) | ((u32)bssid[3] << 24);
+    hi = (u32)bssid[4] | ((u32)bssid[5] << 8) | BIT(16);
+    mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
+    mt7603_usb_write_reg(dev->udev, 0x00021808, hi);
+
+    if (mt7603_rust_build_wtbl_sta_sequence(bssid, ops, 32, &written) == 0 && written > 0) {
+        mt7603_execute_reg_ops(dev->udev, ops, written);
+        pr_info("mt7603u: assoc_work: Armed WTBL1 & CB0R for AP %pM on channel %d (%zu ops)\n",
+                bssid, dev->current_channel, written);
+    }
+}
+
 static void mt7603_tx_complete(struct urb *urb)
 {
     struct sk_buff *skb = urb->context;
+    if (urb->status != 0) {
+        pr_info_ratelimited("mt7603u: TX URB failed: status=%d actual=%d len=%d\n",
+                            urb->status, urb->actual_length, skb ? skb->len : -1);
+    }
     dev_kfree_skb_any(skb);
     usb_free_urb(urb);
 }
@@ -510,7 +588,6 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     fc = get_unaligned_le16(skb->data);
     hdr = (struct ieee80211_hdr *)skb->data;
     is_mgmt = ieee80211_is_mgmt(fc);
-
     memset(&params, 0, sizeof(params));
     params.hdr_len = ieee80211_hdrlen(fc);
     params.frm_type = (fc >> 2) & 0x3;
@@ -520,9 +597,17 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     params.no_ack = params.is_bm;
     /* mgmt frames route through the LMAC MGMT queue (Q_IDX_AC4). */
     params.queue = is_mgmt ? 0x04 : (skb_get_queue_mapping(skb) & 0x0f);
-    params.pid = 0; /* WCID 0 for unassociated broadcast */
+    params.pid = params.is_bm ? 0 : 1; /* WCID 1 for associated AP, 0 for broadcast */
     params.rate_idx = 0;
     params.pkt_len = skb->len;
+
+    if (is_mgmt && (params.sub_type == 0 || params.sub_type == 2)) {
+        const u8 *bssid = hdr->addr1;
+        if (!is_zero_ether_addr(bssid) && !is_broadcast_ether_addr(bssid)) {
+            memcpy(dev->assoc_bssid, bssid, ETH_ALEN);
+            schedule_work(&dev->assoc_work);
+        }
+    }
 
     /* Vendor MlmeTransmit rate selection (cmm_data.c:1666-1683):
      * 2.4G (ch<=14) -> CCK 1M LONG_PREAMBLE, 5G -> OFDM 6M. */
@@ -558,24 +643,16 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     skb_push(skb, 32);
     memcpy(skb->data, txwi, 32);
 
-    if (is_mgmt) {
-        /* MT7603 mgmt path: EP 0x08 (CommandBulkOutAddr), URB length is
-         * 4-aligned frame length + 4 (USB_END_PADDING), tail zero-padded
-         * (cmm_data_usb.c:1751-1754 RtmpUSBMgmtKickOut). */
-        ep = MT7603_MGMT_BULK_OUT;
-        pad_len = ((skb->len + 3) & ~3) + 4 - skb->len;
-        if (skb_tailroom(skb) < pad_len) {
-            struct sk_buff *nskb = skb_copy_expand(skb, skb_headroom(skb), pad_len, GFP_ATOMIC);
-            dev_kfree_skb_any(skb);
-            if (!nskb)
-                return;
-            skb = nskb;
-        }
-        memset(skb_put(skb, pad_len), 0, pad_len);
-    } else {
-        /* data path: AC queue EP 0x05 */
-        ep = MT7603_DATA_BULK_OUT;
+    ep = is_mgmt ? MT7603_MGMT_BULK_OUT : MT7603_DATA_BULK_OUT;
+    pad_len = ((skb->len + 3) & ~3) + 4 - skb->len;
+    if (skb_tailroom(skb) < pad_len) {
+        struct sk_buff *nskb = skb_copy_expand(skb, skb_headroom(skb), pad_len, GFP_ATOMIC);
+        dev_kfree_skb_any(skb);
+        if (!nskb)
+            return;
+        skb = nskb;
     }
+    memset(skb_put(skb, pad_len), 0, pad_len);
 
     struct urb *urb = usb_alloc_urb(0, GFP_ATOMIC);
     if (!urb) {
@@ -592,6 +669,9 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
         usb_unanchor_urb(urb);
         usb_free_urb(urb);
         dev_kfree_skb_any(skb);
+    } else if (params.frm_type == 2) {
+        pr_info("mt7603u: DATA TX submitted: type=%u subtype=%u ep=0x%02x len=%d pid=%u queue=%u\n",
+                params.frm_type, params.sub_type, ep, skb->len, params.pid, params.queue);
     } else {
         pr_info_ratelimited("mt7603u: TX submitted: type=%u subtype=%u ep=0x%02x len=%d\n",
                             params.frm_type, params.sub_type, ep, skb->len);
@@ -606,6 +686,26 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
     int ret;
 
     pr_info("mt7603u: sta_add: addr=%pM aid=%d vif_type=%d\n", sta->addr, sta->aid, vif ? vif->type : -1);
+
+    if (sta && !is_zero_ether_addr(sta->addr)) {
+        struct cfg80211_bss *bss_entry = cfg80211_get_bss(hw->wiphy, NULL, sta->addr, NULL, 0,
+                                                           IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
+        if (bss_entry) {
+            if (bss_entry->channel && bss_entry->channel->hw_value != dev->current_channel) {
+                pr_info("mt7603u: sta_add: BSS scan cache hit for %pM: tuning to channel %d (%d MHz)\n",
+                        sta->addr, bss_entry->channel->hw_value, bss_entry->channel->center_freq);
+                mt7603_set_channel(dev, bss_entry->channel->hw_value);
+            }
+            cfg80211_put_bss(hw->wiphy, bss_entry);
+        } else if (vif && vif->bss_conf.bss && vif->bss_conf.bss->channel) {
+            u8 ch = vif->bss_conf.bss->channel->hw_value;
+            if (ch != dev->current_channel) {
+                pr_info("mt7603u: sta_add: tuning to channel %d (%d MHz)\n",
+                        ch, vif->bss_conf.bss->channel->center_freq);
+                mt7603_set_channel(dev, ch);
+            }
+        }
+    }
 
     if (sta && !is_zero_ether_addr(sta->addr)) {
         u32 lo = (u32)sta->addr[0] | ((u32)sta->addr[1] << 8) |
@@ -805,9 +905,11 @@ int mt7603_register_mac80211(struct usb_interface *intf, struct ieee80211_hw **o
             dev->eeprom[0x46], dev->eeprom[0x47]);
 
     init_usb_anchor(&dev->tx_anchor);
+    INIT_WORK(&dev->assoc_work, mt7603_assoc_work);
 
     SET_IEEE80211_DEV(hw, &intf->dev);
     hw->queues = 4;
+    set_bit(IEEE80211_HW_SIGNAL_DBM, hw->flags);
     /* Reserve 32 bytes in front of every 802.11 TX frame for the
      * TMAC_TXD_L long TXD (vendor TXWISize = sizeof(TMAC_TXD_L) = 32). */
     hw->extra_tx_headroom = 32;
@@ -838,6 +940,7 @@ void mt7603_unregister_mac80211(struct ieee80211_hw *hw)
     if (!hw) return;
     dev = hw->priv;
     dev->running = false;
+    cancel_work_sync(&dev->assoc_work);
     mt7603_stop_rx(dev);
     usb_kill_anchored_urbs(&dev->tx_anchor);
     ieee80211_unregister_hw(hw);

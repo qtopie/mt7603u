@@ -44,11 +44,12 @@
 
 ### 2.7 WTBL1 Table & BSSID Sequence Generation (STA 硬件单播接收表项)
 - **Inputs:** `bssid: *const u8`, `ops_buf: *mut RegWriteOp`, `max_ops: usize`, `out_count: *mut usize`
-- **Outputs:** 生成 WTBL1 Entry 0 (广播/通配默认条目, 0x28000) 与 Entry 1 (AP 专用单播条目, 0x28014) 的寄存器配置序列
-  - Entry 0 (0x28000): DW0=`0x304EFF_FF` (`rv=1, rc_a2=1, rc_a1=1, muar_idx=0x0e`), DW1=`0xFFFFFFFF`, DW2=`0x00000000` (Cipher None)
-  - Entry 1 (0x28014): DW0=`(1<<28)|(1<<29)|(1<<22)|(bssid[5]<<8)|bssid[4]`, DW1=`bssid[0..3]`, DW2=`0x00000000` (Cipher None)
-- **Rationale:** MT7603 硬件要求单播数据帧（包括未加密的 EAPOL 帧）在 WTBL1 中存在有效条目 (`rv=1`) 且 Cipher Suite 匹配（明文阶段设为 NONE），否则硬件直接丢弃单播数据帧导致 4-Way 握手超时断开。
-- **Mapped Spec:** 厂商 `AsicUpdateRxWCIDTable` (hw_ctrl/cmm_asic_mt.c:2874) 与 `mt_hw_tb_init` (mac/mt_mac.c:1845)
+- **Outputs:** 生成 WTBL1 Entry 0 (广播/通配默认条目, 0x28000) 与 Entry 1 (AP 专用单播条目, 0x28014) 及 WTBL1OR 刷新寄存器配置序列
+  - Entry 0 (0x28000): DW0=`0x304EFF_FF` (`rv=1, rc_a2=1, rc_a1=1, muar_idx=0x0e`), DW1=`0xFFFFFFFF`, DW2=`0x00000000` (Cipher None, adm=0), DW3=`0x30000000` (`i_psm=1, du_i_psm=1`), DW4=`0x00000000`
+  - Entry 1 (0x28014): DW0=`(1<<28)|(1<<29)|(1<<22)|(bssid[5]<<8)|bssid[4]`, DW1=`bssid[0..3]`, DW2=`0x40000000` (Cipher None, adm=1 - Address Match Enable), DW3=`0x30000800` (`i_psm=1, du_i_psm=1, wtbl2_eid=1`), DW4=`0x00821000` (`partial_aid=1, wtbl4_eid=1, wtbl3_eid=2`)
+  - Flush (0x2A300): `WTBL1OR` 写 `0x80000000` (`PSM_W_FLAG` 置位触发硬件表项刷新) 后写 `0x00000000` (清除 `PSM_W_FLAG`)
+- **Rationale:** MT7603 硬件要求单播数据帧（包括未加密的 EAPOL 帧）在 WTBL1 中存在完整 20 字节有效条目 (`rv=1`, `adm=1`, DW3 `i_psm/wtbl2_eid`, DW4 `aid/wtbl3_4_eid`) 且 Cipher Suite 匹配（明文阶段设为 NONE），否则硬件直接丢弃单播数据帧导致 4-Way 握手超时断开。
+- **Mapped Spec:** 厂商 `AsicUpdateRxWCIDTable` (hw_ctrl/cmm_asic_mt.c:2874, 2967, 3005-3044) 与 `mt_hw_tb_init` (mac/mt_mac.c:1845-1867)
 
 ## 3. Acceptance Criteria (BDD)
 
@@ -112,11 +113,15 @@
 #### Scenario 6: [SPEC-STA-006] Build WTBL1 Sequence for Associated AP
 - **Given** 目标 AP BSSID `fc:34:97:19:0e:01`
 - **When** 调用 `build_wtbl_sta_sequence(&bssid, &mut ops)`
-- **Then** 函数返回 `0` 且 `out_written` 大于等于 6
+- **Then** 函数返回 `0` 且 `out_written` 大于等于 11
 - **And** `ops[0]` 写入 `0x00028000` 包含 `(1<<28)|(1<<29)|(1<<22)|0x000E0000|0xFFFF`
-- **And** `ops[3]` 写入 `0x00028014` 包含 `(1<<28)|(1<<29)|(1<<22)|(0x01<<8)|0x0E`
-- **And** `ops[4]` 写入 `0x00028018` 值为 `0x199734fc`
-- **And** `ops[5]` 写入 `0x0002801C` 值为 `0x00000000` (Cipher None)
+- **And** `ops[5]` 写入 `0x00028014` 包含 `(1<<28)|(1<<29)|(1<<22)|((bssid[5]<<8)|bssid[4])`
+- **And** `ops[6]` 写入 `0x00028018` 值为 `0x199734fc`
+- **And** `ops[7]` 写入 `0x0002801C` 值为 `0x40000000` (Cipher None, adm=1)
+- **And** `ops[8]` 写入 `0x00028020` 值为 `0x30000800` (DW3 i_psm=1, du_i_psm=1, wtbl2_eid=1)
+- **And** `ops[9]` 写入 `0x00028024` 值为 `0x00821000` (DW4 aid=1, wtbl4_eid=1, wtbl3_eid=2)
+- **And** `ops[10]` 写入 `0x0002A300` 值为 `0x80000000` (WTBL1OR PSM_W_FLAG)
 - **Mapped Test:** `src/rust/src/sta.rs:test_build_wtbl_sta_sequence`
+
 
 

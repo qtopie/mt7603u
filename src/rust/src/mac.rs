@@ -107,8 +107,8 @@ pub fn build_mac_init_sequence(out_ops: &mut [RegWriteOp]) -> Result<usize, i32>
         }, // Min 14 bytes (0x0E << 24) + Max 102400 (0x19000)
         RegWriteOp {
             addr: RMAC_RFCR,
-            val: 0x0000_0006,
-        }, // DROP_FCS_ERROR_FRAME (0x2) | RX_PROMISCUOUS_MODE (0x4)
+            val: 0x0000_0002,
+        }, // DROP_FCS_ERROR_FRAME (0x2), promiscuous disabled for HW Auto-ACK
         RegWriteOp {
             addr: RMAC_RFCR1,
             val: 0x0000_0000,
