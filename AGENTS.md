@@ -40,8 +40,8 @@ Linux 驱动设计理论与 MT76 系列拆解笔记，用于理解架构与术�
 - `mt7601u.md`: **MT7601U 深度拆解**（姊妹芯片，架构高度相似）——厂商原版 vs mac80211 主线重构（Kuba），覆盖 MCU/Andes、USB 端点布局、EEPROM/eFuse、RTMP 框架分层。
 - `crescentrose-writing-drivers.md`: Rust + `rusb`(libusb) 编写用户态 USB 驱动的完整路径（可作为 Rust 侧实现模式参考）。
 
-### 6.2 原厂驱动源码: `~/workspace/buildroot_platform_hardware_wifi_mtk_drivers_mt7603/`
-MTK 官方 `MT7603U` 驱动（v1.14，`JEDI.L0.MP1.mt7603u.v1.14`）。**项目巨大，只允许参考与 mt7603u 直接相关的部分，不得通读/复制无关芯片代码。** 关键文件映射：
+### 6.2 原厂驱动源码: `~/workspace/projects/mt7603u-vendor/` (或 `~/workspace/buildroot_platform_hardware_wifi_mtk_drivers_mt7603/`)
+MTK 官方 `MT7603U` 驱动（v1.14，`JEDI.L0.MP1.mt7603u.v1.14`，位于 `vendor` 分支）。**项目巨大，只允许参考与 mt7603u 直接相关的部分，不得通读/复制无关芯片代码。** 关键文件映射：
 mt7601u在/home/qtopierw/workspace/projects/mt7601u
 
 | 关注点 | 参考文件 (相对该项目根目录) |
