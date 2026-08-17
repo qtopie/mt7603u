@@ -64,6 +64,35 @@ This repository maintains clear isolation between the upstream vendor reference 
 
 ---
 
+## 📱 Reference Test Device: 360 随身WiFi 3
+
+This driver is validated and tested on the **Qihoo 360 随身WiFi 3** ([Official Page](https://wifi.360.cn/easy)), an MT7603U-powered USB dongle with dual onboard PIFA antennas.
+
+<p align="center">
+  <img src="docs/assets/360_wifi_3.jpg" alt="360 随身WiFi 3" width="600" />
+</p>
+
+### Hardware Specifications
+
+| Specification | Details |
+|---|---|
+| **Product Model** | 360 随身WiFi 3 (Qihoo 360 Portable WiFi 3) |
+| **USB ID** | `0x0E8D:0x760C` / `0x0E8D:0x7603` |
+| **Bus Interface** | USB 2.0 |
+| **Protocol Standards** | IEEE 802.11n, IEEE 802.11g, IEEE 802.11b |
+| **Channel Bandwidth** | 20 MHz / 40 MHz |
+| **Frequency Range** | 2.412 GHz – 2.4835 GHz |
+| **Operating Channels** | Channels 1 – 11 (US/CN) / Channels 1 – 13 (ETSI) |
+| **Antenna Design** | Built-in Dual MIMO PIFA Antennas (2T2R configuration) |
+| **Max Transmission Power** | 19 dBm (Max) |
+| **Transmission Rates** | • **802.11b**: 1, 2, 5.5, 11 Mbps<br>• **802.11g**: 6, 9, 12, 18, 24, 36, 48, 54 Mbps<br>• **802.11n**: Up to 300 Mbps (MCS0–MCS15, 2 Streams) |
+| **Encryption / Security** | WPA-PSK / WPA2-PSK (TKIP/CCMP) |
+| **Supported Features** | Auto rate adaptation, QoS-WMM, WMM-PS, Cisco CCX, Infrastructure & Ad-Hoc modes, Power Management, Activity LED |
+| **Operating Environment** | Working Temp: 0℃ ~ 40℃, Storage Temp: -20℃ ~ 70℃<br>Working Humidity: 10% ~ 90% RH (non-condensing) |
+| **Physical Dimensions** | 49 mm × 19 mm × 8.1 mm, Weight: 6.5 g (ABS + PC plastic casing) |
+
+---
+
 ## 🚀 Getting Started
 
 ### Prerequisites
