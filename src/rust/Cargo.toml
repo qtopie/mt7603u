@@ -1,0 +1,30 @@
+[package]
+name = "mt7603u_logic"
+version = "0.1.0"
+edition = "2021"
+authors = ["Antigravity Agent"]
+description = "Pure no_std logic static library for MT7603U Linux driver"
+
+[lib]
+name = "mt7603u_logic"
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "mt7603u-user-runner"
+path = "src/bin/user_runner.rs"
+required-features = ["user-runner"]
+
+[features]
+default = []
+user-runner = ["dep:rusb"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+
+[dependencies]
+rusb = { version = "0.9", optional = true }
