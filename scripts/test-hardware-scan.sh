@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IFNAME="wlx000c43760301"
+IFNAME="wlxb0d59d8c8c7a"
 
 echo "=== [Hardware Scan Test] 检查 MT7603U 物理网卡 WiFi 扫描能力 ==="
 
