@@ -7,7 +7,7 @@
 
 pub const FW_TXD_HDR_SIZE: usize = 12;
 pub const USB_END_PADDING: usize = 4;
-pub const MT7603_E2_FW_SIZE: usize = 74372;
+pub const MT7603_E2_FW_SIZE: usize = 86348;
 
 // Command IDs (include/mcu/andes_mt.h)
 pub const MT_TARGET_ADDRESS_LEN_REQ: u8 = 0x01;
@@ -188,11 +188,12 @@ pub fn build_fw_start_req(
 /// Sent when the chip's RAM firmware is already running (e.g. re-probe / warm
 /// restart) so the MCU resets its execution back to ROM code.
 ///
-/// This is a runtime-phase command (the RAM firmware is already executing), so
-/// it must use the 32-byte full FW_TXD header — vendor `AndesMTFillCmdHeader`
-/// uses `sizeof(*fw_txd)` when `Ctl->Stage == FW_RUN_TIME`. A 12-byte short
-/// header would not be parsed by the running firmware, leaving the ROM restart
-/// never acknowledged and TOP_MISC2 stuck at RAM-running (0x03/0x02).
+/// Vendor `AndesMTLoadFwMethod1` sets `Ctl->Stage = FW_DOWNLOAD` *before*
+/// issuing `CmdRestartDLReq`, so `AndesMTFillCmdHeader` extends the packet
+/// header by only 12 bytes (short FW_TXD) for this command. The 32-byte full
+/// header is reserved for `FW_RUN_TIME` commands (e.g. channel switch); using
+/// it here makes the running RAM firmware fail to parse the restart request,
+/// so the MCU never jumps back to ROM and TOP_MISC2 stays at RAM-running.
 pub fn build_restart_dl_req(seq: u8, out_buf: &mut [u8]) -> Result<usize, i32> {
     build_fw_txd_frame(
         MT_RESTART_DL_REQ,
@@ -201,7 +202,7 @@ pub fn build_restart_dl_req(seq: u8, out_buf: &mut [u8]) -> Result<usize, i32> {
         EXT_CMD_NA,
         seq,
         true,
-        FW_TXD_FULL_SIZE,
+        FW_TXD_HDR_SIZE,
         &[],
         out_buf,
     )
@@ -667,7 +668,7 @@ mod tests {
         let res = build_restart_dl_req(1, &mut out);
         assert!(res.is_ok());
         let len = res.unwrap();
-        assert_eq!(len, 32); // 32-byte full runtime header, no payload
+        assert_eq!(len, 12); // 12-byte short FW_DOWNLOAD header (vendor fills short header for restart-dl)
         assert_eq!(out[4], MT_RESTART_DL_REQ);
         assert_eq!(out[5], PKT_ID_CMD);
         assert_eq!(out[6], CMD_NA);
@@ -730,7 +731,7 @@ mod tests {
         let fw_bytes = include_bytes!("../../../harness/fixtures/mt7603u_e2.bin");
         let dl = fw_dl_len(fw_bytes).unwrap();
         assert!(dl > 0);
-        assert!(dl < MT_UPLOAD_FW_UNIT as u32 * 20); // sanity: within scatterable range
+        assert!(dl < MT_UPLOAD_FW_UNIT as u32 * 30); // sanity: within scatterable range (86348B e2 fw needs ~22 chunks)
     }
 
     #[test]

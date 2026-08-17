@@ -85,12 +85,9 @@ int mt7603_usb_send_cmd(struct usb_device *udev, const u8 *frame, size_t frame_l
     memset(buf + frame_len, 0, MT7603_USB_END_PADDING);
 
     ret = usb_bulk_msg(udev, usb_sndbulkpipe(udev, MT7603_CMD_BULK_OUT),
-                       buf, frame_len + MT7603_USB_END_PADDING, NULL, 3000);
+                       buf, frame_len + MT7603_USB_END_PADDING, NULL, 500);
     dev_dbg(&udev->dev, "MT7603U: bulk-out send len=%zu ret=%d cid=0x%02x\n",
             frame_len + MT7603_USB_END_PADDING, ret, frame_len >= 5 ? frame[4] : 0);
-    if (ret < 0) {
-        usb_clear_halt(udev, usb_sndbulkpipe(udev, MT7603_CMD_BULK_OUT));
-    }
     kfree(buf);
     return ret < 0 ? ret : 0;
 }
@@ -374,7 +371,26 @@ static int mt7603_download_firmware(struct usb_device *udev, const struct firmwa
         return ret;
     }
 
-    /* 1. Switch to bypass mode + force QID 8 */
+    /* 1. If RAM firmware already running, issue CmdRestartDLReq to jump back to ROM */
+    ret = mt7603_usb_read_reg(udev, MT7603_TOP_MISC2, &val);
+    if (ret < 0)
+        return ret;
+
+    if ((val & 0x02) == 0x02) {
+        u8 restart_cmd[MT7603_FW_SCATTER_MAX_PAYLOAD + 32];
+        size_t restart_len = 0;
+
+        dev_info(&udev->dev, "MT7603U: firmware already running (TOP_MISC2=0x%x), issuing CmdRestartDLReq\n", val);
+        ret = mt7603_rust_build_restart_dl_req(mt7603_next_cmd_seq(&cmd_seq),
+                                               restart_cmd,
+                                               sizeof(restart_cmd),
+                                               &restart_len);
+        if (ret == 0) {
+            mt7603_restart_dl_rsp(udev, restart_cmd, restart_len);
+        }
+    }
+
+    /* 2. Switch to bypass mode + force QID 8 for firmware download */
     ret = mt7603_usb_read_reg(udev, MT7603_SCH_REG4, &val);
     if (ret < 0)
         return ret;
@@ -399,27 +415,14 @@ static int mt7603_download_firmware(struct usb_device *udev, const struct firmwa
         goto restore;
     }
 
-    /* 2. Check whether RAM firmware already running */
-    ret = mt7603_usb_read_reg(udev, MT7603_TOP_MISC2, &val);
-    if (ret < 0)
-        goto free_cmd;
-
-    if ((val & 0x02) == 0x02) {
-        /* Firmware already running: reuse it (vendor LOAD_FW_ONE_TIME path,
-         * mcu/andes_mt.c). A running RAM firmware does NOT respond to
-         * CmdRestartDLReq (cid=0xEF) in a reliable way: the bulk-out send
-         * times out (-110) or the MCU never jumps back to ROM, leaving the
-         * driver stuck at "ROM code not ready". Skipping the download and
-         * proceeding with MAC init is the vendor-blessed recovery. */
-        dev_info(&udev->dev, "MT7603U: firmware already running (TOP_MISC2=0x%x), reusing it (LOAD_FW_ONE_TIME)\n", val);
-        ret = 0;
-        goto free_cmd;
-    }
+    /* 3. Wait for ROM code ready: bit0=1 && bit1=0 */
 
     /* 3. Wait for ROM code ready: bit0=1 && bit1=0 */
     ret = mt7603_poll_top_misc2(udev, 0x03, 0x01);
     if (ret < 0) {
-        dev_err(&udev->dev, "MT7603U: ROM code not ready\n");
+        u32 misc2 = 0;
+        mt7603_usb_read_reg(udev, MT7603_TOP_MISC2, &misc2);
+        dev_err(&udev->dev, "MT7603U: ROM code not ready (TOP_MISC2=0x%x)\n", misc2);
         goto free_cmd;
     }
 

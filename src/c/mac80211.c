@@ -135,8 +135,9 @@ static void mt7603_rx_complete(struct urb *urb)
                         memset(status, 0, sizeof(*status));
                         status->band = NL80211_BAND_2GHZ;
                         status->freq = 2407 + (dev->current_channel ? dev->current_channel : 1) * 5;
+                        status->chains = BIT(0);
                         /* RSSI from Group3 RxVector IBRssi0 (dBm). 0 = unknown. */
-                        status->signal = rx_info.rssi ? (int)rx_info.rssi * 100 : 0;
+                        status->chain_signal[0] = status->signal = rx_info.rssi ? (int)rx_info.rssi * 100 : 0;
 
                         ieee80211_rx(dev->hw, skb);
                     }
@@ -251,6 +252,9 @@ static int mt7603_set_channel(struct mt7603u_dev *dev, u8 channel)
     if (channel < 1 || channel > 14)
         channel = 1;
 
+    /* Wait briefly for any in-flight mgmt TX on EP 0x08 to drain */
+    usb_wait_anchor_empty_timeout(&dev->tx_anchor, 50);
+
     /* Vendor `mt7603_switch_channel` (chips/mt7603.c:152) only issues MCU
      * commands — CmdChannelSwitch + CmdSetTxPowerCtrl — and writes no MAC
      * registers. Our earlier extra writes (ARB_RQCR/ARB_SCR) violated the
@@ -298,6 +302,12 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
     pr_info("mt7603u: mac80211 start requested\n");
     dev->running = true;
 
+    /* Vendor RT28XXDMAEnable enables USB RX bulk aggregation in normal mode.
+     * Start RX ring (EP 0x84) and MCU cmd response ring (EP 0x85) FIRST so the
+     * firmware can deliver event responses to EXT commands without stalling. */
+    mt7603_usb_enable_udma(dev->udev, true);
+    mt7603_start_rx(dev);
+
     cmd_buf = kzalloc(MT7603_EEPROM_SIZE + 64, GFP_KERNEL);
     if (!cmd_buf) {
         pr_err("mt7603u: failed to allocate cmd buffer\n");
@@ -321,12 +331,6 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
     } else {
         pr_warn("mt7603u: eFuse EEPROM not available, skipping calibration upload\n");
     }
-
-    /* Vendor RT28XXDMAEnable enables USB RX bulk aggregation in normal mode
-     * (usb_aggregation default on). Keep aggregation enabled so the firmware
-     * streams RX frames to EP 0x84; without it the EP 0x84 URBs never fill. */
-    mt7603_usb_enable_udma(dev->udev, true);
-    mt7603_start_rx(dev);
 
     ret = mt7603_rust_get_mac_init_sequence(ops, 32, &written);
     if (ret == 0 && written > 0) {
@@ -387,9 +391,12 @@ static int mt7603_mac80211_config(struct ieee80211_hw *hw, int radio_idx, u32 ch
     struct mt7603u_dev *dev = hw->priv;
 
     if (hw->conf.chandef.chan) {
-        pr_info("mt7603u: config() chan=%d freq=%d changed=0x%x\n",
-                hw->conf.chandef.chan->hw_value, hw->conf.chandef.chan->center_freq, changed);
-        mt7603_set_channel(dev, hw->conf.chandef.chan->hw_value);
+        u8 ch = hw->conf.chandef.chan->hw_value;
+        if ((changed & IEEE80211_CONF_CHANGE_CHANNEL) || ch != dev->current_channel) {
+            pr_info("mt7603u: config() chan=%d freq=%d changed=0x%x\n",
+                    ch, hw->conf.chandef.chan->center_freq, changed);
+            mt7603_set_channel(dev, ch);
+        }
     } else {
         pr_info("mt7603u: config() no chan\n");
     }
