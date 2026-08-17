@@ -139,6 +139,35 @@ pub unsafe extern "C" fn mt7603_rust_build_own_mac_sequence(
     }
 }
 
+/// Builds WTBL1 sequence for STA mode (Entry 0 Broadcast + Entry 1 AP BSSID).
+///
+/// # Safety
+/// Caller must ensure `bssid` points to a 6-byte array,
+/// `ops_buf` points to a writeable array of size `max_ops` (>= 6),
+/// and `out_count` points to a valid `usize`.
+#[no_mangle]
+pub unsafe extern "C" fn mt7603_rust_build_wtbl_sta_sequence(
+    bssid: *const u8,
+    ops_buf: *mut RegWriteOp,
+    max_ops: usize,
+    out_count: *mut usize,
+) -> i32 {
+    if bssid.is_null() || ops_buf.is_null() || out_count.is_null() {
+        return -22; // -EINVAL
+    }
+    let bssid_slice = core::slice::from_raw_parts(bssid, 6);
+    let mut bssid_arr = [0u8; 6];
+    bssid_arr.copy_from_slice(bssid_slice);
+    let slice = core::slice::from_raw_parts_mut(ops_buf, max_ops);
+    match sta::build_wtbl_sta_sequence(&bssid_arr, slice) {
+        Ok(count) => {
+            *out_count = count;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
 /// Parses an RX packet buffer.
 ///
 /// # Safety

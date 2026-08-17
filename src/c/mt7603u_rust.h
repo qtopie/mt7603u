@@ -59,6 +59,7 @@ struct mt7603_sta_bss_info {
 extern int mt7603_rust_parse_eeprom(const uint8_t *buf, size_t len, struct mt7603_eeprom_data *out);
 extern int mt7603_rust_get_mac_init_sequence(struct reg_write_op *ops_buf, size_t max_ops, size_t *out_count);
 extern int mt7603_rust_build_own_mac_sequence(const uint8_t *mac, struct reg_write_op *ops_buf, size_t max_ops, size_t *out_count);
+extern int mt7603_rust_build_wtbl_sta_sequence(const uint8_t *bssid, struct reg_write_op *ops_buf, size_t max_ops, size_t *out_count);
 extern int mt7603_rust_get_channel_sequence(uint8_t channel, uint8_t bw, struct reg_write_op *ops_buf, size_t max_ops, size_t *out_count);
 extern int mt7603_rust_parse_rx_frame(const uint8_t *data, size_t len, int8_t rssi_offset, struct mt7603_rx_info *out);
 extern int mt7603_rust_build_txwi(const struct mt7603_tx_params *params, uint8_t *txwi_buf, size_t txwi_len);

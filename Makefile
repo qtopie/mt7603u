@@ -30,6 +30,7 @@ rust_build:
 		-u mt7603_rust_map_register_addr \
 		-u mt7603_rust_get_mac_init_sequence \
 		-u mt7603_rust_build_own_mac_sequence \
+		-u mt7603_rust_build_wtbl_sta_sequence \
 		-u mt7603_rust_get_channel_sequence \
 		-u mt7603_rust_parse_rx_frame \
 		-u mt7603_rust_build_txwi \

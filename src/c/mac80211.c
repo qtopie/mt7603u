@@ -112,7 +112,7 @@ static void mt7603_rx_complete(struct urb *urb)
                  * Subtracting 4 here truncates every frame -- corrupt beacons
                  * and broken EAPOL -- so pass the frame through as-is. */
                 size_t payload_len = rx_info.pkt_len;
-                if (offset + payload_len + 4 <= remaining) {
+                if (offset + payload_len <= remaining) {
                     u8 *hdr = frame_ptr + offset;
                     u16 fc = hdr[0] | (hdr[1] << 8);
 
@@ -344,6 +344,15 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
         pr_info("mt7603u: Own MAC sequence applied (%pM)\n", dev->mac_addr);
     }
 
+    {
+        static const u8 bcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        ret = mt7603_rust_build_wtbl_sta_sequence(bcast_addr, ops, 32, &written);
+        if (ret == 0 && written > 0) {
+            mt7603_execute_reg_ops(dev->udev, ops, written);
+            pr_info("mt7603u: WTBL1 default sequence applied (%zu ops)\n", written);
+        }
+    }
+
     // Power on RF radio
     if (mt7603_rust_build_radio_on_off_cmd(true, seq, cmd_buf, MT7603_EEPROM_SIZE + 64, &written) == 0 && written > 0) {
         mt7603_usb_send_cmd(dev->udev, cmd_buf, written);
@@ -377,7 +386,17 @@ static void mt7603_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
 
 static int mt7603_mac80211_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 {
-    pr_info("mt7603u: add_interface requested (type=%d)\n", vif->type);
+    struct mt7603u_dev *dev = hw->priv;
+    struct reg_write_op ops[32];
+    size_t written = 0;
+    pr_info("mt7603u: add_interface requested (type=%d addr=%pM)\n", vif->type, vif->addr);
+
+    if (vif && !is_zero_ether_addr(vif->addr)) {
+        if (mt7603_rust_build_own_mac_sequence(vif->addr, ops, 32, &written) == 0 && written > 0) {
+            mt7603_execute_reg_ops(dev->udev, ops, written);
+            pr_info("mt7603u: Own MAC updated for vif (%pM)\n", vif->addr);
+        }
+    }
     return 0;
 }
 
@@ -420,23 +439,23 @@ static void mt7603_mac80211_configure_filter(struct ieee80211_hw *hw,
 static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_bss_conf *info, u64 changed)
 {
     struct mt7603u_dev *dev = hw->priv;
+    struct reg_write_op ops[32];
+    size_t written = 0;
+    int ret;
+    const u8 *bssid = info ? info->bssid : NULL;
+
+    pr_info("mt7603u: bss_info_changed: changed=0x%llx bssid=%pM assoc=%d\n",
+            changed, bssid, vif ? vif->cfg.assoc : -1);
 
     if (changed & BSS_CHANGED_BEACON) {
-        pr_info("mt7603u: AP beacon state changed (enabled=%d)\n", info->enable_beacon);
+        pr_info("mt7603u: AP beacon state changed (enabled=%d)\n", info ? info->enable_beacon : 0);
     }
-    if (changed & BSS_CHANGED_BSSID) {
-        pr_info("mt7603u: BSSID changed to %pM\n", info->bssid);
-        /* Vendor `AsicSetBssid` (hw_ctrl/cmm_asic_mt.c:574) writes the
-         * Current BSSID into RMAC_CB0R0/R1 (WF_RMAC_BASE+0x04/0x08, HIF
-         * 0x21804/0x21808). The firmware uses this to filter and forward
-         * unicast data frames (e.g. EAPOL M1) from the associated AP to
-         * EP 0x84. Without it the STA associates but never receives the
-         * 4-way handshake -- the AP kicks us with DISASSOC_DUE_TO_INACTIVITY.
-         * Note: disassoc reports bssid == NULL or all-zero. */
-        if (info->bssid && !is_zero_ether_addr(info->bssid)) {
-            u32 lo = (u32)info->bssid[0] | ((u32)info->bssid[1] << 8) |
-                     ((u32)info->bssid[2] << 16) | ((u32)info->bssid[3] << 24);
-            u32 hi = (u32)info->bssid[4] | ((u32)info->bssid[5] << 8) | BIT(16);
+    if (changed & (BSS_CHANGED_BSSID | BSS_CHANGED_ASSOC)) {
+        pr_info("mt7603u: BSSID/ASSOC changed to %pM (assoc=%d)\n", bssid, vif ? vif->cfg.assoc : -1);
+        if (bssid && !is_zero_ether_addr(bssid) && (vif ? vif->cfg.assoc : 1)) {
+            u32 lo = (u32)bssid[0] | ((u32)bssid[1] << 8) |
+                     ((u32)bssid[2] << 16) | ((u32)bssid[3] << 24);
+            u32 hi = (u32)bssid[4] | ((u32)bssid[5] << 8) | BIT(16);
             int r;
             r = mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
             if (r == 0)
@@ -445,13 +464,24 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
                 pr_warn("mt7603u: RMAC_CB0R write failed (%d)\n", r);
             else
                 pr_info("mt7603u: Current BSSID programmed (CB0R0=0x%08x CB0R1=0x%08x)\n", lo, hi);
+
+            ret = mt7603_rust_build_wtbl_sta_sequence(bssid, ops, 32, &written);
+            if (ret == 0 && written > 0) {
+                mt7603_execute_reg_ops(dev->udev, ops, written);
+                pr_info("mt7603u: WTBL1 STA sequence applied for %pM (%zu ops)\n", bssid, written);
+            }
         } else {
             mt7603_usb_write_reg(dev->udev, 0x00021804, 0);
             mt7603_usb_write_reg(dev->udev, 0x00021808, 0);
-            pr_info("mt7603u: Current BSSID cleared\n");
+            mt7603_usb_write_reg(dev->udev, 0x00028014, 0);
+            mt7603_usb_write_reg(dev->udev, 0x00028018, 0);
+            mt7603_usb_write_reg(dev->udev, 0x0002801C, 0);
+            pr_info("mt7603u: Current BSSID & WTBL1 Entry 1 cleared\n");
         }
     }
 }
+
+
 
 static void mt7603_tx_complete(struct urb *urb)
 {
@@ -570,19 +600,46 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
 
 static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_sta *sta)
 {
-    pr_info("mt7603u: AP client associated: %pM (aid=%d)\n", sta->addr, sta->aid);
+    struct mt7603u_dev *dev = hw->priv;
+    struct reg_write_op ops[32];
+    size_t written = 0;
+    int ret;
+
+    pr_info("mt7603u: sta_add: addr=%pM aid=%d vif_type=%d\n", sta->addr, sta->aid, vif ? vif->type : -1);
+
+    if (sta && !is_zero_ether_addr(sta->addr)) {
+        u32 lo = (u32)sta->addr[0] | ((u32)sta->addr[1] << 8) |
+                 ((u32)sta->addr[2] << 16) | ((u32)sta->addr[3] << 24);
+        u32 hi = (u32)sta->addr[4] | ((u32)sta->addr[5] << 8) | BIT(16);
+        mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
+        mt7603_usb_write_reg(dev->udev, 0x00021808, hi);
+
+        ret = mt7603_rust_build_wtbl_sta_sequence(sta->addr, ops, 32, &written);
+        if (ret == 0 && written > 0) {
+            mt7603_execute_reg_ops(dev->udev, ops, written);
+            pr_info("mt7603u: WTBL1 STA sequence applied in sta_add for %pM (%zu ops)\n", sta->addr, written);
+        }
+    }
     return 0;
 }
 
 static int mt7603_mac80211_sta_remove(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_sta *sta)
 {
-    pr_info("mt7603u: AP client disassociated: %pM\n", sta->addr);
+    struct mt7603u_dev *dev = hw->priv;
+    pr_info("mt7603u: sta_remove: addr=%pM\n", sta ? sta->addr : NULL);
+    mt7603_usb_write_reg(dev->udev, 0x00021804, 0);
+    mt7603_usb_write_reg(dev->udev, 0x00021808, 0);
+    mt7603_usb_write_reg(dev->udev, 0x00028014, 0);
+    mt7603_usb_write_reg(dev->udev, 0x00028018, 0);
+    mt7603_usb_write_reg(dev->udev, 0x0002801C, 0);
     return 0;
 }
 
 static void mt7603_mac80211_sta_notify(struct ieee80211_hw *hw, struct ieee80211_vif *vif, enum sta_notify_cmd cmd, struct ieee80211_sta *sta)
 {
 }
+
+
 
 static int mt7603_mac80211_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd, struct ieee80211_vif *vif, struct ieee80211_sta *sta, struct ieee80211_key_conf *key)
 {

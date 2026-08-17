@@ -93,6 +93,58 @@ pub fn parse_beacon(frame_buf: &[u8]) -> Result<StaBssInfo, i32> {
     Ok(info)
 }
 
+pub const WTBL1_BASE: u32 = 0x0002_8000;
+pub const WTBL1_ENTRY_SIZE: u32 = 0x14; // 20 bytes
+
+pub fn build_wtbl_sta_sequence(
+    bssid: &[u8; 6],
+    out_ops: &mut [crate::ffi::RegWriteOp],
+) -> Result<usize, i32> {
+    if out_ops.len() < 6 {
+        return Err(-28); // -ENOSPC
+    }
+
+    // Entry 0 (Broadcast/Multicast default entry at 0x28000):
+    // DW0: rv=1 (bit 28), rc_a2=1 (bit 29), rc_a1=1 (bit 22), muar_idx=0x0E (bits 16..21), addr_4=0xFF, addr_5=0xFF
+    let dw0_mcast = (1 << 29) | (1 << 28) | (1 << 22) | (0x0E << 16) | (0xFF << 8) | 0xFF;
+    let dw1_mcast = 0xFFFF_FFFF;
+    let dw2_mcast = 0x0000_0000; // WTBL_CIPHER_NONE
+
+    // Entry 1 (Associated AP unicast entry at 0x28014):
+    // DW0: rv=1 (bit 28), rc_a2=1 (bit 29), rc_a1=1 (bit 22), muar_idx=0x00 (bits 16..21), addr_4=bssid[4], addr_5=bssid[5]
+    let dw0_ap = (1 << 29) | (1 << 28) | (1 << 22) | ((bssid[5] as u32) << 8) | (bssid[4] as u32);
+    let dw1_ap = u32::from_le_bytes([bssid[0], bssid[1], bssid[2], bssid[3]]);
+    let dw2_ap = 0x0000_0000; // WTBL_CIPHER_NONE
+
+    out_ops[0] = crate::ffi::RegWriteOp {
+        addr: WTBL1_BASE,
+        val: dw0_mcast,
+    };
+    out_ops[1] = crate::ffi::RegWriteOp {
+        addr: WTBL1_BASE + 0x04,
+        val: dw1_mcast,
+    };
+    out_ops[2] = crate::ffi::RegWriteOp {
+        addr: WTBL1_BASE + 0x08,
+        val: dw2_mcast,
+    };
+
+    out_ops[3] = crate::ffi::RegWriteOp {
+        addr: WTBL1_BASE + WTBL1_ENTRY_SIZE,
+        val: dw0_ap,
+    };
+    out_ops[4] = crate::ffi::RegWriteOp {
+        addr: WTBL1_BASE + WTBL1_ENTRY_SIZE + 0x04,
+        val: dw1_ap,
+    };
+    out_ops[5] = crate::ffi::RegWriteOp {
+        addr: WTBL1_BASE + WTBL1_ENTRY_SIZE + 0x08,
+        val: dw2_ap,
+    };
+
+    Ok(6)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +199,38 @@ mod tests {
         assert_eq!(&info.ssid[..7], b"Home-AP");
         assert_eq!(info.ssid_len, 7);
         assert_eq!(info.channel, 6);
+    }
+
+    #[test]
+    fn test_build_wtbl_sta_sequence() {
+        let bssid = [0xFC, 0x34, 0x97, 0x19, 0x0E, 0x01];
+        let mut ops = [crate::ffi::RegWriteOp::default(); 8];
+
+        let res = build_wtbl_sta_sequence(&bssid, &mut ops);
+        assert!(res.is_ok());
+        let written = res.unwrap();
+        assert_eq!(written, 6);
+
+        // Entry 0 Broadcast (0x28000)
+        assert_eq!(ops[0].addr, 0x0002_8000);
+        assert_eq!(
+            ops[0].val,
+            (1 << 29) | (1 << 28) | (1 << 22) | (0x0E << 16) | 0xFFFF
+        );
+        assert_eq!(ops[1].addr, 0x0002_8004);
+        assert_eq!(ops[1].val, 0xFFFF_FFFF);
+        assert_eq!(ops[2].addr, 0x0002_8008);
+        assert_eq!(ops[2].val, 0x0000_0000);
+
+        // Entry 1 AP BSSID (0x28014)
+        assert_eq!(ops[3].addr, 0x0002_8014);
+        assert_eq!(
+            ops[3].val,
+            (1 << 29) | (1 << 28) | (1 << 22) | (0x01 << 8) | 0x0E
+        );
+        assert_eq!(ops[4].addr, 0x0002_8018);
+        assert_eq!(ops[4].val, 0x1997_34FC);
+        assert_eq!(ops[5].addr, 0x0002_801C);
+        assert_eq!(ops[5].val, 0x0000_0000);
     }
 }

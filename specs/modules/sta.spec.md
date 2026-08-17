@@ -1,7 +1,11 @@
 # Module Spec: Station (STA) Mode Operations
 
 ## 1. Overview
-规范定义 802.11 STA (Station) 客户端模式核心处理逻辑与数据通路交互契约（扫描与 Probe Request 构造、Beacon/Probe Response 解析、信道切换配置序列、RX 接收解析与 RxWI 剥离、TX 发送与 TxWI 封装、BSS 过滤配置）。
+规范定义 802.11 STA (Station) 客户端模式核心处理逻辑与数据通路交互契约（扫描与 Probe Request 构造、Beacon/Probe Response 解析、信道切换配置序列、RX 接收解析与 RxWI 剥离、TX 发送与 TxWI 封装、BSS 过滤配置与安全协议能力边界）。
+
+### 1.1 安全协议支持范围 (Security Scope)
+- **Supported (支持):** Open (无加密), WPA-PSK (TKIP / CCMP), WPA2-PSK (AES-CCMP).
+
 
 ## 2. Interface / API Contract
 
@@ -37,6 +41,14 @@
   - `CB0R1` = `bssid[4] | bssid[5]<<8 | BIT(16)`（bit16 使能）
 - **Rationale:** 固件依赖 Current BSSID 过滤并转发关联 AP 的单播 data 帧（如 EAPOL M1）到 EP 0x84。缺失时 STA 关联成功但 4-way 握手收不到 M1，AP 以 `DISASSOC_DUE_TO_INACTIVITY` (reason=4) 踢出。
 - **Mapped Spec:** 厂商 `AsicSetBssid` (hw_ctrl/cmm_asic_mt.c:574)，寄存器定义 `include/mac/mac_mt/wf_rmac.h:68`
+
+### 2.7 WTBL1 Table & BSSID Sequence Generation (STA 硬件单播接收表项)
+- **Inputs:** `bssid: *const u8`, `ops_buf: *mut RegWriteOp`, `max_ops: usize`, `out_count: *mut usize`
+- **Outputs:** 生成 WTBL1 Entry 0 (广播/通配默认条目, 0x28000) 与 Entry 1 (AP 专用单播条目, 0x28014) 的寄存器配置序列
+  - Entry 0 (0x28000): DW0=`0x304EFF_FF` (`rv=1, rc_a2=1, rc_a1=1, muar_idx=0x0e`), DW1=`0xFFFFFFFF`, DW2=`0x00000000` (Cipher None)
+  - Entry 1 (0x28014): DW0=`(1<<28)|(1<<29)|(1<<22)|(bssid[5]<<8)|bssid[4]`, DW1=`bssid[0..3]`, DW2=`0x00000000` (Cipher None)
+- **Rationale:** MT7603 硬件要求单播数据帧（包括未加密的 EAPOL 帧）在 WTBL1 中存在有效条目 (`rv=1`) 且 Cipher Suite 匹配（明文阶段设为 NONE），否则硬件直接丢弃单播数据帧导致 4-Way 握手超时断开。
+- **Mapped Spec:** 厂商 `AsicUpdateRxWCIDTable` (hw_ctrl/cmm_asic_mt.c:2874) 与 `mt_hw_tb_init` (mac/mt_mac.c:1845)
 
 ## 3. Acceptance Criteria (BDD)
 
@@ -94,4 +106,17 @@
 - **And** `out_buf[4]` 为 `pid = 1`
 - **And** `out_buf[8]` 为 `rate_idx = 7`
 - **Mapped Test:** `src/rust/src/tx.rs:test_build_txwi`
+
+### Feature: WTBL1 Table & BSSID Sequence Generation
+
+#### Scenario 6: [SPEC-STA-006] Build WTBL1 Sequence for Associated AP
+- **Given** 目标 AP BSSID `fc:34:97:19:0e:01`
+- **When** 调用 `build_wtbl_sta_sequence(&bssid, &mut ops)`
+- **Then** 函数返回 `0` 且 `out_written` 大于等于 6
+- **And** `ops[0]` 写入 `0x00028000` 包含 `(1<<28)|(1<<29)|(1<<22)|0x000E0000|0xFFFF`
+- **And** `ops[3]` 写入 `0x00028014` 包含 `(1<<28)|(1<<29)|(1<<22)|(0x01<<8)|0x0E`
+- **And** `ops[4]` 写入 `0x00028018` 值为 `0x199734fc`
+- **And** `ops[5]` 写入 `0x0002801C` 值为 `0x00000000` (Cipher None)
+- **Mapped Test:** `src/rust/src/sta.rs:test_build_wtbl_sta_sequence`
+
 

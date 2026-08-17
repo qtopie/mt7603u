@@ -40,11 +40,10 @@ Linux 驱动设计理论与 MT76 系列拆解笔记，用于理解架构与术�
 - `mt7601u.md`: **MT7601U 深度拆解**（姊妹芯片，架构高度相似）——厂商原版 vs mac80211 主线重构（Kuba），覆盖 MCU/Andes、USB 端点布局、EEPROM/eFuse、RTMP 框架分层。
 - `crescentrose-writing-drivers.md`: Rust + `rusb`(libusb) 编写用户态 USB 驱动的完整路径（可作为 Rust 侧实现模式参考）。
 
-### 6.2 原厂驱动源码: `~/workspace/projects/mt7603u-vendor/` (或 `~/workspace/buildroot_platform_hardware_wifi_mtk_drivers_mt7603/`)
-MTK 官方 `MT7603U` 驱动（v1.14，`JEDI.L0.MP1.mt7603u.v1.14`，位于 `vendor` 分支）。**项目巨大，只允许参考与 mt7603u 直接相关的部分，不得通读/复制无关芯片代码。** 关键文件映射：
-mt7601u在/home/qtopierw/workspace/projects/mt7601u
+### 6.2 原厂驱动源码: `~/workspace/projects/mt7603u-vendor/` (主参考源 SSOT)
+**`~/workspace/projects/mt7603u-vendor/` 为本驱动芯片行为与寄存器事实的第一且唯一主权威参考目录**。该目录包含 MTK 官方 `MT7603U` 驱动（v1.14，`JEDI.L0.MP1.mt7603u.v1.14`，位于 `vendor` 分支）。**项目体量大，开发时仅参考与 MT7603U 直接相关的部分，严禁修改其中任何文件。** 核心文件映射：
 
-| 关注点 | 参考文件 (相对该项目根目录) |
+| 关注点 | 参考文件 (相对 `~/workspace/projects/mt7603u-vendor/`) |
 |---|---|
 | 芯片寄存器初始化序列 | `chips/mt7603.c` (BBPInit / init_mac_cr / switch_channel / tx_pwr) |
 | 芯片寄存器宏定义 | `include/chip/mt7603.h` |
@@ -56,7 +55,7 @@ mt7601u在/home/qtopierw/workspace/projects/mt7601u
 | USB 收发路径 | `os/linux/rt_usb.c`、`rt_usb_util.c`、`common/` 下 `rtusb_bulk*` |
 
 **使用规则：**
-1. 涉及寄存器地址、位域、时序、固件加载、EEPROM 字段时，**必须**回查该项目源码确认事实，禁止凭记忆写值。
-2. 仅参考与 mt7603u 相关的代码路径（`mt7603*`、`mt_mac_usb`、`rt_usb*`、`rtusb_dev_id.c` 中 `#ifdef MT7603` 块）；`mt7601`/`mt7628`/`rt28xx` 等其他芯片文件仅作跨代对比，不作为事实依据。
+1. 涉及寄存器地址、位域、时序、固件加载、EEPROM 字段、端点路由及 RMAC 过滤规则时，**必须**直接回查 `~/workspace/projects/mt7603u-vendor/` 源码确认事实，禁止凭推测或记忆写值。
+2. 仅参考与 MT7603U 相关的代码路径（`mt7603*`、`mt_mac_usb`、`rt_usb*`、`rtusb_dev_id.c` 中 `#ifdef MT7603` 块）；其他芯片文件仅作历史对比，不作为事实依据。
 3. 移植到 Rust 时，参考其**行为与寄存器值**，重新按 Rust/SDD 规范组织架构，禁止直接复制 C 代码结构。
 4. 硬件 I/O 在 `harness/mocks/` 中 Mock（如 `RegOps` / `UsbBus` trait），原厂驱动的真实访问序列写入 `specs/` 作为契约来源。

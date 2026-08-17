@@ -86,8 +86,10 @@ int mt7603_usb_send_cmd(struct usb_device *udev, const u8 *frame, size_t frame_l
 
     ret = usb_bulk_msg(udev, usb_sndbulkpipe(udev, MT7603_CMD_BULK_OUT),
                        buf, frame_len + MT7603_USB_END_PADDING, NULL, 500);
+
     dev_dbg(&udev->dev, "MT7603U: bulk-out send len=%zu ret=%d cid=0x%02x\n",
             frame_len + MT7603_USB_END_PADDING, ret, frame_len >= 5 ? frame[4] : 0);
+
     kfree(buf);
     return ret < 0 ? ret : 0;
 }
@@ -125,6 +127,15 @@ static void mt7603_rsp_complete(struct urb *urb)
     struct mt7603_rsp_session *s = urb->context;
     int i, n = urb->actual_length;
 
+    if (urb->status == 0 && urb->actual_length >= 4) {
+        if (s->buf[2] != 0x00 || (s->buf[3] & 0xf0) != 0xe0) {
+            /* Leftover data frame in bulk buffer, discard and resubmit */
+            int r = usb_submit_urb(urb, GFP_ATOMIC);
+            if (r == 0)
+                return;
+        }
+    }
+
     if (n > 32)
         n = 32;
     s->status = urb->status;
@@ -138,6 +149,7 @@ static void mt7603_rsp_complete(struct urb *urb)
     if (s->gate)
         complete(s->gate);
 }
+
 
 /* Submit a pending response URB *before* the need_rsp command is sent.
  * `ep` selects the bulk-IN endpoint: EP 0x84 (DataBulkInAddr, download mode)
@@ -415,16 +427,16 @@ static int mt7603_download_firmware(struct usb_device *udev, const struct firmwa
         goto restore;
     }
 
-    /* 3. Wait for ROM code ready: bit0=1 && bit1=0 */
-
-    /* 3. Wait for ROM code ready: bit0=1 && bit1=0 */
-    ret = mt7603_poll_top_misc2(udev, 0x03, 0x01);
+    /* 3. Wait for ROM code ready: vendor checks (SW_SYN0 & 0x01) == 0x01 */
+    ret = mt7603_poll_top_misc2(udev, 0x01, 0x01);
     if (ret < 0) {
         u32 misc2 = 0;
         mt7603_usb_read_reg(udev, MT7603_TOP_MISC2, &misc2);
         dev_err(&udev->dev, "MT7603U: ROM code not ready (TOP_MISC2=0x%x)\n", misc2);
         goto free_cmd;
     }
+
+
 
     /* 4. CmdAddressLenReq: dl_len = le32(fw tail) + 4 (CRC) */
     ret = mt7603_rust_fw_dl_len(fw->data, fw->size, &dl_len);
