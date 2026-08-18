@@ -178,4 +178,26 @@ mod tests {
         let info = parse_rx_frame(&buf2, 0).unwrap();
         assert_eq!(info.rssi, 0);
     }
+
+    #[test]
+    fn test_parse_rx_eapol_data_frame() {
+        // grp_vld = 7 -> Header is 16 + 16 (G1) + 8 (G2) + 24 (G3) = 64 bytes
+        let mut buf = [0u8; 128];
+        buf[0] = 128; // rx_byte_cnt = 128
+        buf[1] = 0;
+        buf[3] = (0x02 << 5) | (0x07 << 1); // pkt_type = RX_NORMAL(0x02), grp_vld = 7
+        buf[5] = 6; // Ch 6
+        buf[64] = 0x08; // Data frame FC (Type = 2, Subtype = 0) at offset 64
+        buf[65] = 0x00;
+
+        let res = parse_rx_frame(&buf, 0);
+        assert!(res.is_ok());
+        let info = res.unwrap();
+        assert_eq!(info.hdr_len, 64);
+        assert_eq!(info.pkt_len, 64);
+        assert_eq!(info.channel, 6);
+        assert_eq!(info.is_beacon, 0);
+        assert_eq!(info.is_data, 1);
+        assert_eq!(info.is_crc_error, 0);
+    }
 }

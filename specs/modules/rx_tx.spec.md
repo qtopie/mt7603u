@@ -35,7 +35,7 @@ Probe Request（STA 主动扫描，ch≤14）场景取值：
 | DW1 | [12:8] | hdr_info | hdr_len>>1（Probe Req=12） | TMI_HDR_INFO_2_VAL，hdr_len 必须偶数 |
 | DW1 | [14:13] | hdr_format | TMI_HDR_FT_NOR_80211(2) | mt_mac.c:910 |
 | DW1 | [15] | ft | TMI_FT_LONG(1) | mt_mac.c:909 |
-| DW1 | [18:16] | hdr_pad | 0 | info->hdr_pad |
+| DW1 | [18:16] | hdr_pad | (TMI_HDR_PAD_MODE_TAIL(0)<<2) \| ((4 - (hdr_len & 3)) & 3) (Probe Req=0, QoS Data=2) | mac/mt_mac.c:1063-1064 |
 | DW1 | [19] | no_ack | 1（Probe Req 无 ACK） | mt_mac.c:915，info->Ack=0 |
 | DW1 | [22:20] | tid | 0 | mac_info.TID=0 |
 | DW1 | [23] | protect_frm | 0 | info->prot=0 |
@@ -131,3 +131,13 @@ Probe Request（STA 主动扫描，ch≤14）场景取值：
 - **And** `buf[24:28]` DW6 = fix_rate_mode(0) | bw(0x4)<<8 | spe_en(1)<<11 | tx_rate(0)<<18
 - **And** 返回写入长度 `32`
 - **Mapped Test:** `src/rust/src/tx.rs:test_build_txwi`
+
+#### Scenario 6: [SPEC-RXTX-006] QoS Data Frame 32-byte Long TXD with Header Padding
+- **Given** `TxParams` 结构体包含 26 字节 QoS Data 字段（hdr_len=26, fc_type=2, fc_subtype=8, no_ack=0, is_bm=0, queue=Q_IDX_AC0, pid=1, pkt_len=155）
+- **When** 调用 `mt7603_rust_build_txwi(params, buf, 32)`
+- **Then** 函数返回 `0`
+- **And** `buf[0:4]` DW0 `tx_byte_cnt` 为 `189` (32 + 2 + 155)
+- **And** `buf[4:8]` DW1 `hdr_info` 为 `13` (26 >> 1) 且 `hdr_pad` (bits 18:16) 为 `2`
+- **And** `buf[8:12]` DW2 `sub_type` 为 `8`, `frm_type` 为 `2`, `bc_mc_pkt` 为 `0`, `ba_disable` 为 `1`, `fix_rate` 为 `1`
+- **And** 返回写入长度 `32`
+- **Mapped Test:** `src/rust/src/tx.rs:test_build_txwi_qos_data_pad`

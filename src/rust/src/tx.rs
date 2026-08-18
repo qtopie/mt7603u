@@ -15,6 +15,7 @@ const MT_TX_SHORT_RETRY: u32 = 0x0f;
 const TMI_DAS_FROM_MPDU: u32 = 0;
 const TMI_BSN_CFG_BY_SW: u32 = 0x1;
 const TMI_PM_BIT_CFG_BY_HW: u32 = 0x0;
+const TMI_HDR_PAD_MODE_TAIL: u32 = 0;
 
 // Rate PHY modes (`rtmp_comm.h:301-305`)
 const MODE_CCK: u32 = 0;
@@ -70,22 +71,26 @@ pub fn build_txwi(params: &TxParams, out_buf: &mut [u8]) -> Result<usize, i32> {
         return Err(-22); // -EINVAL: TMI_HDR_INFO_2_VAL requires even hdr_len
     }
 
+    let hdr_pad_len = (4 - (hdr_len & 0x03)) & 0x03;
+    let hdr_pad = (TMI_HDR_PAD_MODE_TAIL << 2) | (hdr_pad_len & 0x03);
+
     // ---- DWORD 0 ----
-    // [15:0] tx_byte_cnt = txd_size + Length (= 32 + pkt_len, vendor mt_mac.c:1139)
+    // [15:0] tx_byte_cnt = txd_size + Length + hdr_pad_len (= 32 + pkt_len + pad, vendor mt_mac.c:1139)
     // [16:22] eth_type_offset (0), [23] ip_sum (0), [24] ut_sum (0),
     // [25] UNxV (0), [26] UTxB (0), [30:27] q_idx, [31] p_idx (P_IDX_LMAC)
-    let dw0 = ((params.pkt_len as u32) + TXWI_SIZE as u32)
+    let dw0 = ((params.pkt_len as u32) + hdr_pad_len + TXWI_SIZE as u32)
         | ((params.queue as u32 & 0x0f) << 27)
         | (P_IDX_LMAC << 31);
 
     // ---- DWORD 1 ----
     // [7:0] wlan_idx, [12:8] hdr_info = hdr_len>>1, [14:13] hdr_format = NOR_80211(2),
-    // [15] ft = LONG(1), [18:16] hdr_pad (0), [19] no_ack, [22:20] tid (0),
+    // [15] ft = LONG(1), [18:16] hdr_pad, [19] no_ack, [22:20] tid (0),
     // [23] protect_frm (0), [31:26] own_mac (0)
     let dw1 = (params.pid as u32 & 0xff)
         | (((hdr_len >> 1) & 0x1f) << 8)
         | (TMI_HDR_FT_NOR_80211 << 13)
         | (TMI_FT_LONG << 15)
+        | ((hdr_pad & 0x07) << 16)
         | ((params.no_ack as u32 & 0x1) << 19);
 
     // ---- DWORD 2 ----
@@ -240,6 +245,45 @@ mod tests {
         };
         let mut buf = [0u8; 32];
         assert_eq!(build_txwi(&params, &mut buf), Err(-22));
+    }
+
+    #[test]
+    fn test_build_txwi_qos_data_pad() {
+        let params = TxParams {
+            rate_idx: 0,
+            pid: 1,      // wlan_idx = 1
+            queue: 0x00, // Q_IDX_AC0
+            hdr_len: 26, // QoS data header
+            frm_type: 2, // data
+            sub_type: 8, // QoS data
+            no_ack: 0,
+            is_bm: 0,
+            rate_mode: 0, // MODE_CCK
+            rate_mcs: 0,  // CCK 1M
+            preamble: 1,  // LONG_PREAMBLE
+            bw: 0,        // BW_20
+            pkt_len: 155,
+        };
+        let mut buf = [0u8; 32];
+        assert_eq!(build_txwi(&params, &mut buf), Ok(32));
+
+        // DW0: tx_byte_cnt = 32 + 2(pad) + 155 = 189
+        let dw0 = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        assert_eq!(dw0 & 0xffff, 189, "tx_byte_cnt");
+
+        // DW1: wlan_idx=1, hdr_info=13 (26>>1), hdr_pad=2
+        let dw1 = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        assert_eq!(dw1 & 0xff, 1, "wlan_idx");
+        assert_eq!((dw1 >> 8) & 0x1f, 13, "hdr_info");
+        assert_eq!((dw1 >> 16) & 0x7, 2, "hdr_pad");
+
+        // DW2: sub_type=8, frm_type=2, bc_mc_pkt=0, ba_disable=1, fix_rate=1
+        let dw2 = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        assert_eq!(dw2 & 0xf, 8, "sub_type");
+        assert_eq!((dw2 >> 4) & 0x3, 2, "frm_type");
+        assert_eq!((dw2 >> 10) & 0x1, 0, "bc_mc_pkt");
+        assert_eq!((dw2 >> 29) & 0x1, 1, "ba_disable");
+        assert_eq!((dw2 >> 31) & 0x1, 1, "fix_rate");
     }
 
     #[test]

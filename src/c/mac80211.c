@@ -41,8 +41,6 @@ struct mt7603u_dev {
     struct urb *cmd_urb;
     void *cmd_buf;
     struct usb_anchor tx_anchor;
-    struct work_struct assoc_work;
-    u8 assoc_bssid[ETH_ALEN];
 };
 
 static void mt7603_cmd_rsp_complete(struct urb *urb)
@@ -465,7 +463,7 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
     }
     if (changed & (BSS_CHANGED_BSSID | BSS_CHANGED_ASSOC)) {
         pr_info("mt7603u: BSSID/ASSOC changed to %pM (assoc=%d)\n", bssid, vif ? vif->cfg.assoc : -1);
-        if (bssid && !is_zero_ether_addr(bssid) && (vif ? vif->cfg.assoc : 1)) {
+        if (bssid && !is_zero_ether_addr(bssid)) {
             struct cfg80211_bss *bss_entry = cfg80211_get_bss(hw->wiphy, NULL, bssid, NULL, 0,
                                                                IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
             if (bss_entry) {
@@ -503,6 +501,14 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
             else
                 pr_info("mt7603u: Current BSSID programmed (CB0R0=0x%08x CB0R1=0x%08x)\n", lo, hi);
 
+            /* Clear MBSSID mask in RMAC_RMACDR (0x00021878) to ensure Single BSSID mode */
+            u32 rmacdr = 0;
+            if (mt7603_usb_read_reg(dev->udev, 0x00021878, &rmacdr) == 0) {
+                rmacdr &= ~(0x3 << 24); /* Clear RMACDR_MBSSID_MASK */
+                mt7603_usb_write_reg(dev->udev, 0x00021878, rmacdr);
+                pr_info("mt7603u: RMAC_RMACDR configured for Single BSSID mode (0x%08x)\n", rmacdr);
+            }
+
             ret = mt7603_rust_build_wtbl_sta_sequence(bssid, ops, 32, &written);
             if (ret == 0 && written > 0) {
                 mt7603_execute_reg_ops(dev->udev, ops, written);
@@ -520,42 +526,6 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
 }
 
 
-
-static void mt7603_assoc_work(struct work_struct *work)
-{
-    struct mt7603u_dev *dev = container_of(work, struct mt7603u_dev, assoc_work);
-    struct reg_write_op ops[32];
-    size_t written = 0;
-    u8 bssid[ETH_ALEN];
-    u32 lo, hi;
-
-    memcpy(bssid, dev->assoc_bssid, ETH_ALEN);
-    if (is_zero_ether_addr(bssid) || is_broadcast_ether_addr(bssid))
-        return;
-
-    struct cfg80211_bss *bss = cfg80211_get_bss(dev->hw->wiphy, NULL, bssid, NULL, 0,
-                                                IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
-    if (bss) {
-        if (bss->channel && bss->channel->hw_value != dev->current_channel) {
-            pr_info("mt7603u: assoc_work: tuning to channel %d (%d MHz)\n",
-                    bss->channel->hw_value, bss->channel->center_freq);
-            mt7603_set_channel(dev, bss->channel->hw_value);
-        }
-        cfg80211_put_bss(dev->hw->wiphy, bss);
-    }
-
-    lo = (u32)bssid[0] | ((u32)bssid[1] << 8) |
-         ((u32)bssid[2] << 16) | ((u32)bssid[3] << 24);
-    hi = (u32)bssid[4] | ((u32)bssid[5] << 8) | BIT(16);
-    mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
-    mt7603_usb_write_reg(dev->udev, 0x00021808, hi);
-
-    if (mt7603_rust_build_wtbl_sta_sequence(bssid, ops, 32, &written) == 0 && written > 0) {
-        mt7603_execute_reg_ops(dev->udev, ops, written);
-        pr_info("mt7603u: assoc_work: Armed WTBL1 & CB0R for AP %pM on channel %d (%zu ops)\n",
-                bssid, dev->current_channel, written);
-    }
-}
 
 static void mt7603_tx_complete(struct urb *urb)
 {
@@ -595,19 +565,11 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     params.is_bm = hdr->addr1[0] & 0x01;
     /* Probe requests (broadcast) expect no ACK; unicast data expects one. */
     params.no_ack = params.is_bm;
-    /* mgmt frames route through the LMAC MGMT queue (Q_IDX_AC4). */
-    params.queue = is_mgmt ? 0x04 : (skb_get_queue_mapping(skb) & 0x0f);
+    /* mgmt frames route through LMAC MGMT queue (Q_IDX_AC4), data through AC0. */
+    params.queue = is_mgmt ? 0x04 : 0x00;
     params.pid = params.is_bm ? 0 : 1; /* WCID 1 for associated AP, 0 for broadcast */
     params.rate_idx = 0;
     params.pkt_len = skb->len;
-
-    if (is_mgmt && (params.sub_type == 0 || params.sub_type == 2)) {
-        const u8 *bssid = hdr->addr1;
-        if (!is_zero_ether_addr(bssid) && !is_broadcast_ether_addr(bssid)) {
-            memcpy(dev->assoc_bssid, bssid, ETH_ALEN);
-            schedule_work(&dev->assoc_work);
-        }
-    }
 
     /* Vendor MlmeTransmit rate selection (cmm_data.c:1666-1683):
      * 2.4G (ch<=14) -> CCK 1M LONG_PREAMBLE, 5G -> OFDM 6M. */
@@ -627,6 +589,25 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
         pr_warn_ratelimited("mt7603u: build_txwi failed (%d)\n", ret);
         dev_kfree_skb_any(skb);
         return;
+    }
+
+    /* MT7603 DMA requires 4-byte alignment for payload following 802.11 header.
+     * When hdr_len % 4 != 0 (e.g. 26-byte QoS data), insert padding bytes
+     * between the header and payload. */
+    int hdr_pad_len = (4 - (params.hdr_len & 0x03)) & 0x03;
+    if (hdr_pad_len > 0) {
+        if (skb_tailroom(skb) < hdr_pad_len) {
+            struct sk_buff *nskb = skb_copy_expand(skb, skb_headroom(skb), hdr_pad_len, GFP_ATOMIC);
+            dev_kfree_skb_any(skb);
+            if (!nskb)
+                return;
+            skb = nskb;
+        }
+        skb_put(skb, hdr_pad_len);
+        memmove(skb->data + params.hdr_len + hdr_pad_len,
+                skb->data + params.hdr_len,
+                skb->len - params.hdr_len - hdr_pad_len);
+        memset(skb->data + params.hdr_len, 0, hdr_pad_len);
     }
 
     /* Make room for the 32-byte TMAC_TXD_L in front of the 802.11 frame.
@@ -905,7 +886,6 @@ int mt7603_register_mac80211(struct usb_interface *intf, struct ieee80211_hw **o
             dev->eeprom[0x46], dev->eeprom[0x47]);
 
     init_usb_anchor(&dev->tx_anchor);
-    INIT_WORK(&dev->assoc_work, mt7603_assoc_work);
 
     SET_IEEE80211_DEV(hw, &intf->dev);
     hw->queues = 4;
@@ -940,7 +920,6 @@ void mt7603_unregister_mac80211(struct ieee80211_hw *hw)
     if (!hw) return;
     dev = hw->priv;
     dev->running = false;
-    cancel_work_sync(&dev->assoc_work);
     mt7603_stop_rx(dev);
     usb_kill_anchored_urbs(&dev->tx_anchor);
     ieee80211_unregister_hw(hw);

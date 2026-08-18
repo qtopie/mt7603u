@@ -101,7 +101,7 @@ pub fn build_wtbl_sta_sequence(
     bssid: &[u8; 6],
     out_ops: &mut [crate::ffi::RegWriteOp],
 ) -> Result<usize, i32> {
-    if out_ops.len() < 11 {
+    if out_ops.len() < 12 {
         return Err(-28); // -ENOSPC
     }
 
@@ -114,10 +114,10 @@ pub fn build_wtbl_sta_sequence(
     let dw4_mcast = 0x0000_0000;
 
     // Entry 1 (Associated AP unicast entry at 0x28014):
-    // DW0: rv=1 (bit 28), rc_a2=1 (bit 29), rc_a1=1 (bit 22), muar_idx=0x00 (bits 16..21), addr_4=bssid[4], addr_5=bssid[5]
-    let dw0_ap = (1 << 29) | (1 << 28) | (1 << 22) | ((bssid[5] as u32) << 8) | (bssid[4] as u32);
+    // DW0: rv=1 (bit 28), rc_a2=1 (bit 29), muar_idx=0x00 (bits 16..21), addr_4=bssid[4], addr_5=bssid[5]
+    let dw0_ap = (1 << 29) | (1 << 28) | ((bssid[5] as u32) << 8) | (bssid[4] as u32);
     let dw1_ap = u32::from_le_bytes([bssid[0], bssid[1], bssid[2], bssid[3]]);
-    let dw2_ap = 0x4000_0000; // WTBL_CIPHER_NONE, adm=1 (bit 30 Address Match Enable)
+    let dw2_ap = 0x4030_0000; // WTBL_CIPHER_NONE, adm=1 (bit 30), ht=1 (bit 21), qos=1 (bit 20)
     let dw3_ap = (1 << 29) | (1 << 28) | (1 << 11); // i_psm=1, du_i_psm=1, wtbl2_eid=1
     let dw4_ap = (1 << 23) | (1 << 17) | (2 << 11); // partial_aid=1, wtbl4_eid=1, wtbl3_eid=2
 
@@ -168,8 +168,13 @@ pub fn build_wtbl_sta_sequence(
         addr: WTBL1OR,
         val: 0x8000_0000,
     };
+    // Clear PSM_W_FLAG after trigger
+    out_ops[11] = crate::ffi::RegWriteOp {
+        addr: WTBL1OR,
+        val: 0x0000_0000,
+    };
 
-    Ok(11)
+    Ok(12)
 }
 
 #[cfg(test)]
@@ -236,7 +241,7 @@ mod tests {
         let res = build_wtbl_sta_sequence(&bssid, &mut ops);
         assert!(res.is_ok());
         let written = res.unwrap();
-        assert_eq!(written, 11);
+        assert_eq!(written, 12);
 
         // Entry 0 Broadcast (0x28000)
         assert_eq!(ops[0].addr, 0x0002_8000);
@@ -255,14 +260,11 @@ mod tests {
 
         // Entry 1 AP BSSID (0x28014)
         assert_eq!(ops[5].addr, 0x0002_8014);
-        assert_eq!(
-            ops[5].val,
-            (1 << 29) | (1 << 28) | (1 << 22) | (0x01 << 8) | 0x0E
-        );
+        assert_eq!(ops[5].val, (1 << 29) | (1 << 28) | (0x01 << 8) | 0x0E);
         assert_eq!(ops[6].addr, 0x0002_8018);
         assert_eq!(ops[6].val, 0x1997_34FC);
         assert_eq!(ops[7].addr, 0x0002_801C);
-        assert_eq!(ops[7].val, 0x4000_0000);
+        assert_eq!(ops[7].val, 0x4030_0000);
         assert_eq!(ops[8].addr, 0x0002_8020);
         assert_eq!(ops[8].val, 0x3000_0800);
         assert_eq!(ops[9].addr, 0x0002_8024);
@@ -271,5 +273,7 @@ mod tests {
         // Flush WTBL1OR (0x2A300)
         assert_eq!(ops[10].addr, 0x0002_A300);
         assert_eq!(ops[10].val, 0x8000_0000);
+        assert_eq!(ops[11].addr, 0x0002_A300);
+        assert_eq!(ops[11].val, 0x0000_0000);
     }
 }
