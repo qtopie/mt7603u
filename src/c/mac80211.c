@@ -19,6 +19,14 @@ MODULE_PARM_DESC(mt7603_dbg_rx, "Enable verbose per-frame RX logging (default of
 #define MT7603_DATA_BULK_OUT 0x05
 #define MT7603_MGMT_BULK_OUT 0x08
 
+/* WTBL (Wireless Table) register windows — ported from vendor
+ * include/mac/mac_mt/wf_wtblon.h and mt_mac.c mt_wtbl_init. */
+#define WTBL1_BASE       0x00028000 /* WTBL1 (per-station control), 32 B/entry */
+#define WTBL1_ENTRY_SIZE 0x20
+#define WTBL1OR          0x0002A300 /* WTBL1 flush control (PSM_W_FLAG bit 31) */
+#define WTBL3_KEY_BASE   0x00042000 /* WTBL3 (per-station key SRAM), 64 B/entry */
+#define WTBL3_ENTRY_SIZE 0x40
+
 struct mt7603u_dev;
 
 struct mt7603_rx_urb {
@@ -81,79 +89,120 @@ static void mt7603_rx_complete(struct urb *urb)
         while (cur_pos + 16 <= urb->actual_length) {
             u8 *frame_ptr = ((u8 *)urb->transfer_buffer) + cur_pos;
             size_t remaining = urb->actual_length - cur_pos;
-            struct mt7603_rx_info rx_info;
-            int ret = mt7603_rust_parse_rx_frame(frame_ptr, remaining, dev->rssi_offset_2g, &rx_info);
 
             u16 rx_byte_cnt = frame_ptr[0] | (frame_ptr[1] << 8);
             if (rx_byte_cnt == 0 || rx_byte_cnt > remaining) {
                 break;
             }
 
-            if (mt7603_dbg_rx)
-                pr_info_ratelimited("mt7603u: RX parse: ret=%d pkt_len=%d hdr_len=%d crc=%d pkt_type=0x%x byte_cnt=%d\n",
-                                    ret, rx_info.pkt_len, rx_info.hdr_len,
-                                    rx_info.is_crc_error, (frame_ptr[3] >> 5) & 0x07, rx_byte_cnt);
+            /* Dispatch on pkt_type from DW0 bits [31:29] (LE: byte[3][7:5]).
+             * 0x00=TXS, 0x01=TXRXV, 0x02=RX_NORMAL, 0x03=DUP_RFB, 0x07=EVENT.
+             * Vendor: include/mac/mac_mt/mt_mac.h:524-532. */
+            u8 pkt_type = (frame_ptr[3] >> 5) & 0x07;
 
-            if (rx_info.pkt_len >= 2 && rx_info.pkt_len <= 60 && rx_info.is_crc_error == 0) {
-                size_t off = rx_info.hdr_len;
-                if (mt7603_dbg_rx)
-                    pr_info("mt7603u: SHORTFRAME dump: pkt_len=%d fc=0x%04x addr1=%pM addr2=%pM addr3=%pM raw="
-                        "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                        rx_info.pkt_len,
-                        (u16)(frame_ptr[off] | (frame_ptr[off+1] << 8)),
-                        (off + 4 <= remaining) ? (frame_ptr + off + 4) : NULL,
-                        (off + 10 <= remaining) ? (frame_ptr + off + 10) : NULL,
-                        (off + 16 <= remaining) ? (frame_ptr + off + 16) : NULL,
-                        frame_ptr[off], frame_ptr[off+1], frame_ptr[off+2], frame_ptr[off+3],
-                        frame_ptr[off+4], frame_ptr[off+5], frame_ptr[off+6], frame_ptr[off+7],
-                        frame_ptr[off+8], frame_ptr[off+9], frame_ptr[off+10], frame_ptr[off+11],
-                        frame_ptr[off+12], frame_ptr[off+13], frame_ptr[off+14], frame_ptr[off+15]);
-            }
-
-            if (ret == 0 && rx_info.pkt_len > 4 && rx_info.is_crc_error == 0) {
-                size_t offset = rx_info.hdr_len;
-                /* NOTE: MT7603 rxd_0.rx_byte_cnt does NOT include the 4-byte
-                 * hardware FCS (vendor mt_rx_info_2_blk sets MPDUtotalByteCnt =
-                 * rx_byte_cnt - RMACInfoLen and passes it straight to cfg80211;
-                 * the only FCS-subtract work-around in cmm_data.c is #if 0'd).
-                 * Subtracting 4 here truncates every frame -- corrupt beacons
-                 * and broken EAPOL -- so pass the frame through as-is. */
-                size_t payload_len = rx_info.pkt_len;
-                if (offset + payload_len <= remaining) {
-                    u8 *hdr = frame_ptr + offset;
-                    u16 fc = hdr[0] | (hdr[1] << 8);
-
-                    if (mt7603_dbg_rx && (fc & 0x00FC) == 0x0080 && payload_len >= 24) {
-                        pr_info("mt7603u: BEACON FRAME RECEIVED! BSSID=%pM, ch=%u, len=%zu, rssi=%d dBm\n",
-                                &hdr[16], dev->current_channel, payload_len, rx_info.rssi);
-                    } else if (mt7603_dbg_rx && (fc & 0x000C) == 0x0008 && payload_len >= 24) {
-                        /* Data frame: log type (0x2) / subtype and addrs */
-                        pr_info("mt7603u: DATA FRAME RX! fc=0x%04x subtype=%d len=%zu da=%pM sa=%pM bssid=%pM\n",
-                                fc, (fc >> 4) & 0x0F, payload_len,
-                                &hdr[4], &hdr[10], &hdr[16]);
+            if (pkt_type == 0x00) {
+                /* TXS (TX Status) report from LMAC — arrives on EP 0x84 alongside
+                 * normal RX data. Format: RMAC_RXD_0_TXS (4 B DW0) followed by
+                 * txs_cnt × 20-byte TXS_STRUC entries (DW0..DW4).
+                 * Vendor ref: cmm_data.c:492-527, tx_rx/txs.c:108-112. */
+                u8 txs_cnt = frame_ptr[2] & 0x1f; /* DW0 bits [20:16] = byte[2][4:0] */
+                pr_info("mt7603u: TXS report: cnt=%u rx_byte_cnt=%u\n",
+                        txs_cnt, rx_byte_cnt);
+                if (txs_cnt > 0 &&
+                        (size_t)rx_byte_cnt == (size_t)txs_cnt * 20 + 4 &&
+                        cur_pos + (size_t)rx_byte_cnt <= urb->actual_length) {
+                    int txs_i;
+                    for (txs_i = 0; txs_i < (int)txs_cnt; txs_i++) {
+                        u8 *e = frame_ptr + 4 + txs_i * 20;
+                        /* TXS_D_0 (LE): [11:0]=tx_rate, [12]=fr, [13]=txsfm,
+                         * [14]=txs2m, [15]=txs2h, [16]=ME, [17]=RE, [18]=LE,
+                         * [19]=BE, [20]=txop, [21]=ps, [22]=baf, [25:23]=tid */
+                        u32 txs_dw0 = e[0] | ((u32)e[1] << 8) | ((u32)e[2] << 16) | ((u32)e[3] << 24);
+                        /* TXS_D_4 (LE): [11:0]=sn, [13:12]=tbw, [21:14]=pid,
+                         * [22]=fm, [23]=am, [28:24]=mpdu_tx_cnt, [31:29]=last_tx_rate_idx */
+                        u32 txs_dw4 = e[16] | ((u32)e[17] << 8) | ((u32)e[18] << 16) | ((u32)e[19] << 24);
+                        u8 txs_pid = (u8)((txs_dw4 >> 14) & 0xff); /* TXS_D_4.pid */
+                        u8 me      = (u8)((txs_dw0 >> 16) & 0x1);  /* TXS_D_0.ME: 0=ok, 1=err */
+                        pr_info("mt7603u: TXS[%d]: pid=0x%02x ME=%u dw0=0x%08x dw4=0x%08x => %s\n",
+                                txs_i, txs_pid, me, txs_dw0, txs_dw4,
+                                me ? "LMAC_ERR/DROP" : "LMAC_TX_OK");
                     }
+                } else {
+                    pr_warn("mt7603u: TXS malformed: cnt=%u rx_byte_cnt=%u expected=%zu\n",
+                            txs_cnt, rx_byte_cnt, (size_t)txs_cnt * 20 + 4);
+                }
+            } else {
+                /* Normal / DUP-RFB / TXRXV / EVENT frames — parse via Rust and
+                 * deliver to mac80211 as before. */
+                struct mt7603_rx_info rx_info;
+                int ret = mt7603_rust_parse_rx_frame(frame_ptr, remaining, dev->rssi_offset_2g, &rx_info);
 
-                    struct sk_buff *skb = dev_alloc_skb(payload_len + 2);
-                    if (skb) {
-                        skb_reserve(skb, 2);
-                        skb_put_data(skb, hdr, payload_len);
+                if (mt7603_dbg_rx)
+                    pr_info_ratelimited("mt7603u: RX parse: ret=%d pkt_len=%d hdr_len=%d crc=%d pkt_type=0x%x byte_cnt=%d\n",
+                                        ret, rx_info.pkt_len, rx_info.hdr_len,
+                                        rx_info.is_crc_error, pkt_type, rx_byte_cnt);
 
-                        struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
-                        memset(status, 0, sizeof(*status));
-                        status->band = NL80211_BAND_2GHZ;
-                        status->freq = 2407 + (dev->current_channel ? dev->current_channel : 1) * 5;
-                        status->chains = BIT(0);
-                        if (rx_info.rssi != 0) {
-                            status->signal = rx_info.rssi;
-                            status->chain_signal[0] = rx_info.rssi;
-                        } else {
-                            status->flag |= RX_FLAG_NO_SIGNAL_VAL;
+                if (rx_info.pkt_len >= 2 && rx_info.pkt_len <= 60 && rx_info.is_crc_error == 0) {
+                    size_t off = rx_info.hdr_len;
+                    if (mt7603_dbg_rx)
+                        pr_info("mt7603u: SHORTFRAME dump: pkt_len=%d fc=0x%04x addr1=%pM addr2=%pM addr3=%pM raw="
+                            "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            rx_info.pkt_len,
+                            (u16)(frame_ptr[off] | (frame_ptr[off+1] << 8)),
+                            (off + 4 <= remaining) ? (frame_ptr + off + 4) : NULL,
+                            (off + 10 <= remaining) ? (frame_ptr + off + 10) : NULL,
+                            (off + 16 <= remaining) ? (frame_ptr + off + 16) : NULL,
+                            frame_ptr[off], frame_ptr[off+1], frame_ptr[off+2], frame_ptr[off+3],
+                            frame_ptr[off+4], frame_ptr[off+5], frame_ptr[off+6], frame_ptr[off+7],
+                            frame_ptr[off+8], frame_ptr[off+9], frame_ptr[off+10], frame_ptr[off+11],
+                            frame_ptr[off+12], frame_ptr[off+13], frame_ptr[off+14], frame_ptr[off+15]);
+                }
+
+                if (ret == 0 && rx_info.pkt_len > 4 && rx_info.is_crc_error == 0) {
+                    size_t offset = rx_info.hdr_len;
+                    /* NOTE: MT7603 rxd_0.rx_byte_cnt does NOT include the 4-byte
+                     * hardware FCS (vendor mt_rx_info_2_blk sets MPDUtotalByteCnt =
+                     * rx_byte_cnt - RMACInfoLen and passes it straight to cfg80211;
+                     * the only FCS-subtract work-around in cmm_data.c is #if 0'd).
+                     * Subtracting 4 here truncates every frame -- corrupt beacons
+                     * and broken EAPOL -- so pass the frame through as-is. */
+                    size_t payload_len = rx_info.pkt_len;
+                    if (offset + payload_len <= remaining) {
+                        u8 *hdr = frame_ptr + offset;
+                        u16 fc = hdr[0] | (hdr[1] << 8);
+
+                        if (mt7603_dbg_rx && (fc & 0x00FC) == 0x0080 && payload_len >= 24) {
+                            pr_info("mt7603u: BEACON FRAME RECEIVED! BSSID=%pM, ch=%u, len=%zu, rssi=%d dBm\n",
+                                    &hdr[16], dev->current_channel, payload_len, rx_info.rssi);
+                        } else if (mt7603_dbg_rx && (fc & 0x000C) == 0x0008 && payload_len >= 24) {
+                            /* Data frame: log type (0x2) / subtype and addrs */
+                            pr_info("mt7603u: DATA FRAME RX! fc=0x%04x subtype=%d len=%zu da=%pM sa=%pM bssid=%pM\n",
+                                    fc, (fc >> 4) & 0x0F, payload_len,
+                                    &hdr[4], &hdr[10], &hdr[16]);
                         }
 
-                        ieee80211_rx(dev->hw, skb);
+                        struct sk_buff *skb = dev_alloc_skb(payload_len + 2);
+                        if (skb) {
+                            skb_reserve(skb, 2);
+                            skb_put_data(skb, hdr, payload_len);
+
+                            struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
+                            memset(status, 0, sizeof(*status));
+                            status->band = NL80211_BAND_2GHZ;
+                            status->freq = 2407 + (dev->current_channel ? dev->current_channel : 1) * 5;
+                            status->chains = BIT(0);
+                            if (rx_info.rssi != 0) {
+                                status->signal = rx_info.rssi;
+                                status->chain_signal[0] = rx_info.rssi;
+                            } else {
+                                status->flag |= RX_FLAG_NO_SIGNAL_VAL;
+                            }
+
+                            ieee80211_rx(dev->hw, skb);
+                        }
                     }
                 }
-            }
+            } /* end pkt_type dispatch */
 
             size_t padding = (4 - (rx_byte_cnt % 4)) & 0x03;
             size_t subframe_len = rx_byte_cnt + padding + 4; // 4 bytes CSO at tail
@@ -369,6 +418,21 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
         mt7603_usb_send_cmd(dev->udev, cmd_buf, written);
     }
 
+    /* Program EDCA/WMM per-AC contention parameters for all four access
+     * categories. Our MAC init only enables the TX queues (ARB_TQCR0) but
+     * never fills the EDCA table; without it the LMAC TX scheduler has no
+     * AIFS/CW/TxOP for the data AC (EP 0x05 / AC0) and silently drops data
+     * frames. mgmt uses a separate always-on queue, which is why scans/assoc
+     * work but the 4-way handshake M2 never reaches the air. Mirrors vendor
+     * AsicSetAllWmmParam / CmdEdcaParameterSet (EXT_CMD_ID_EDCA_SET=0x27). */
+    seq = dev->cmd_seq = (dev->cmd_seq % 15) + 1;
+    if (mt7603_rust_build_edca_set_cmd(seq, cmd_buf, MT7603_EEPROM_SIZE + 64, &written) == 0 && written > 0) {
+        ret = mt7603_usb_send_cmd(dev->udev, cmd_buf, written);
+        pr_info("mt7603u: EDCA_SET cmd sent (%zu bytes, ret=%d)\n", written, ret);
+    } else {
+        pr_err("mt7603u: EDCA_SET build failed\n");
+    }
+
     kfree(cmd_buf);
     mt7603_set_channel(dev, 1);
     return 0;
@@ -571,6 +635,31 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     params.rate_idx = 0;
     params.pkt_len = skb->len;
 
+    /* mac80211 offloads 802.11 encryption to this driver once set_key succeeds;
+     * it selects the offloaded key and stores it in info->control.hw_key, and
+     * expects the HW to CCMP-encrypt. Mirror that into the TXWI protect_frm bit
+     * so the MAC applies the WTBL3 key for this WCID. */
+    {
+        struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+        params.protect_frm = (info->control.hw_key != NULL) ? 1 : 0;
+    }
+
+    /* Option #2 diagnostic: dump raw skb bytes at TX entry for data frames —
+     * BEFORE any hdr_pad insertion or TXD prepend — to verify that mac80211
+     * hands us the correct EAPOL/data content. Compare with the URB-submit
+     * dump to detect any corruption introduced by the driver's own code path. */
+    if (params.frm_type == 2) {
+        const u8 *_dp = skb->data;
+        int _dlen = (int)skb->len < 80 ? (int)skb->len : 80;
+        int _di;
+        pr_info("mt7603u: DATA TX entry: fc=0x%04x hdr_len=%u skb_len=%u protect_frm=%d\n",
+                fc, params.hdr_len, skb->len, params.protect_frm);
+        for (_di = 0; _di + 8 <= _dlen; _di += 8)
+            pr_info("mt7603u: TX-ENTRY+%02d: %02x %02x %02x %02x  %02x %02x %02x %02x\n",
+                    _di, _dp[_di], _dp[_di+1], _dp[_di+2], _dp[_di+3],
+                    _dp[_di+4], _dp[_di+5], _dp[_di+6], _dp[_di+7]);
+    }
+
     /* Vendor MlmeTransmit rate selection (cmm_data.c:1666-1683):
      * 2.4G (ch<=14) -> CCK 1M LONG_PREAMBLE, 5G -> OFDM 6M. */
     if (dev->current_channel > 14) {
@@ -591,9 +680,21 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
         return;
     }
 
+    /* Option #1 diagnostic: for data frames request LMAC TX-status feedback.
+     * DW5[10]=tx_status_2_host causes LMAC to send a TXS report (pkt_type=0x00)
+     * on EP 0x84 after the TX attempt. DW5[7:0]=pid=0x42 is a sentinel so we
+     * can identify our data-frame TXS reports in mt7603_rx_complete.
+     * ME=0 in the TXS → frame reached air; ME=1 → LMAC dropped / errored.
+     * Vendor ref: mt_mac.h TXS_D_4.pid[21:14], tx_rx/txs.c DataTxSHandler. */
+    if (params.frm_type == 2) {
+        txwi[20] = 0x42;        /* DW5[7:0]  = pid sentinel 0x42 */
+        txwi[21] |= (1u << 2);  /* DW5[10]   = tx_status_2_host  */
+    }
+
     /* MT7603 DMA requires 4-byte alignment for payload following 802.11 header.
      * When hdr_len % 4 != 0 (e.g. 26-byte QoS data), insert padding bytes
-     * between the header and payload. */
+     * between the header and payload so the LMAC TX DMA can fetch the LLC
+     * header on a 4-byte boundary. */
     int hdr_pad_len = (4 - (params.hdr_len & 0x03)) & 0x03;
     if (hdr_pad_len > 0) {
         if (skb_tailroom(skb) < hdr_pad_len) {
@@ -724,9 +825,82 @@ static void mt7603_mac80211_sta_notify(struct ieee80211_hw *hw, struct ieee80211
 
 static int mt7603_mac80211_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd, struct ieee80211_vif *vif, struct ieee80211_sta *sta, struct ieee80211_key_conf *key)
 {
-    pr_info("mt7603u: set_key requested (cmd=%d, cipher=0x%x, key_idx=%d)\n",
-            cmd, key->cipher, key->keyidx);
-    return 0;
+    struct mt7603u_dev *dev = hw->priv;
+    int wcid;
+    u32 wtbl1_base, key_base, dw;
+    int i, ret = 0;
+
+    pr_info("mt7603u: set_key requested (cmd=%d, cipher=0x%x, key_idx=%d, flags=0x%x, len=%d)\n",
+            cmd, key->cipher, key->keyidx, key->flags, key->keylen);
+
+    if (cmd != SET_KEY) {
+        /* Key removal: leave the entry; a follow-up SET_KEY re-programs it.
+         * TODO: clear adm/cipher_suit/key bytes for a clean removal. */
+        return 0;
+    }
+
+    /* Only CCMP (WPA2) is offloaded to hardware today. For any other cipher
+     * we decline so mac80211 falls back to software crypto rather than sending
+     * a frame in clear. */
+    if (key->cipher != WLAN_CIPHER_SUITE_CCMP) {
+        pr_warn("mt7603u: set_key: cipher 0x%x not offloaded to HW (CCMP only)\n",
+                key->cipher);
+        return -EOPNOTSUPP;
+    }
+
+    /* Pairwise key (PTK) is shared with the AP -> WCID 1 (the AP entry used
+     * for both TX to and RX from the AP). Group key (GTK) -> broadcast WCID 0. */
+    if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE)
+        wcid = 1;
+    else if (sta && !is_zero_ether_addr(sta->addr))
+        wcid = 1;
+    else
+        wcid = 0;
+
+    /* Write the 16-byte TK into the WTBL3 key SRAM (host remap window).
+     * Vendor CmdProcAddRemoveKey (cmm_asic_mt.c:3471) writes the CCMP TK as
+     * four little-endian 32-bit words at wtbl_base_addr[2] + wcid*64. */
+    key_base = WTBL3_KEY_BASE + (u32)wcid * WTBL3_ENTRY_SIZE;
+    for (i = 0; i < 4; i++) {
+        u32 w = (u32)key->key[i * 4]
+              | ((u32)key->key[i * 4 + 1] << 8)
+              | ((u32)key->key[i * 4 + 2] << 16)
+              | ((u32)key->key[i * 4 + 3] << 24);
+        mt7603_usb_write_reg(dev->udev, key_base + i * 4, w);
+    }
+
+    /* WTBL1 DW0: mark RX valid (rv), RX key valid (rkv), key index (kid),
+     * and the rate/BA control bits the vendor sets for a keyed entry. */
+    wtbl1_base = WTBL1_BASE + (u32)wcid * WTBL1_ENTRY_SIZE;
+    if (mt7603_usb_read_reg(dev->udev, wtbl1_base, &dw) == 0) {
+        dw |= (1u << 28) /* rv */
+            | (1u << 26)  /* rkv */
+            | (1u << 22)  /* rc_a1 */
+            | (1u << 25)  /* rc_id */
+            | ((u32)(key->keyidx & 0x3) << 23); /* kid */
+        mt7603_usb_write_reg(dev->udev, wtbl1_base, dw);
+    }
+
+    /* WTBL1 DW2: set cipher_suit = CCMP_128 (4) and adm = 1 so the MAC applies
+     * the WTBL3 key. Preserve qos/ht/baf_en/dyn_bw already programmed at init. */
+    if (mt7603_usb_read_reg(dev->udev, wtbl1_base + 0x08, &dw) == 0) {
+        dw &= ~0x78u;          /* clear cipher_suit[6:3] */
+        dw |= (4u << 3);       /* CCMP_128 */
+        dw |= (1u << 30);      /* adm */
+        mt7603_usb_write_reg(dev->udev, wtbl1_base + 0x08, dw);
+    }
+
+    /* Flush the WTBL1 table so the new entry takes effect (PSM_W_FLAG). */
+    mt7603_usb_write_reg(dev->udev, WTBL1OR, 0x80000000);
+    mt7603_usb_write_reg(dev->udev, WTBL1OR, 0x00000000);
+
+    /* Tell mac80211 which hardware slot (WCID) holds this key so it offloads
+     * encryption and sets IEEE80211_TX_CTL_PROTECTED on outgoing frames. */
+    key->hw_key_idx = wcid;
+
+    pr_info("mt7603u: set_key: PTK/GTK installed (wcid=%d keyidx=%d cipher=CCMP)\n",
+            wcid, key->keyidx);
+    return ret;
 }
 
 static int mt7603_mac80211_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif, unsigned int link_id, u16 ac, const struct ieee80211_tx_queue_params *params)

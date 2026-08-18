@@ -97,6 +97,52 @@ pub const WTBL1_BASE: u32 = 0x0002_8000;
 pub const WTBL1_ENTRY_SIZE: u32 = 0x14; // 20 bytes
 pub const WTBL1OR: u32 = 0x0002_A300;
 
+pub const WTBL3_KEY_BASE: u32 = 0x0004_2000; // WTBL key SRAM (host remap) base, stride 64 B/WCID
+pub const WTBL3_ENTRY_SIZE: u32 = 0x40; // 64 bytes per WCID key entry
+
+/// Compute the WTBL2/3/4 PSE page Fragment-ID / Entry-ID for a given WCID.
+/// Ported verbatim from vendor `mt_wtbl_get_entry234` (`mac/mt_mac.c:1789`)
+/// and the base/fid arithmetic in `mt_wtbl_init` (`mac/mt_mac.c:1819-1843`).
+/// The cross-links written into WTBL1 DW3/DW4 let the MAC locate the per-WCID
+/// key (WTBL3) when encrypting/decrypting; without correct FID/EID the key is
+/// never found and the frame is dropped or sent in clear.
+fn wtbl_entry234(wcid: u32) -> (u32, u32, u32, u32, u32, u32) {
+    const PAGE_SIZE: u32 = 128; // MT_PSE_PAGE_SIZE
+    let ecnt2: u32 = PAGE_SIZE / 64; // WTBL2 entry size = 64 -> 2 per page
+    let ecnt3: u32 = PAGE_SIZE / 64; // WTBL3 entry size = 64 -> 2 per page
+    let ecnt4: u32 = PAGE_SIZE / 32; // WTBL4 entry size = 32 -> 4 per page
+    let page_cnt2: u32 = 128_u32.div_ceil(ecnt2);
+    let page_cnt3: u32 = 128_u32.div_ceil(ecnt3);
+    let base_fid2: u32 = 0;
+    let base_fid3: u32 = base_fid2 + page_cnt2;
+    let base_fid4: u32 = base_fid3 + page_cnt3;
+
+    let page_off2 = wcid / ecnt2;
+    let elem_off2 = wcid % ecnt2;
+    let page_off3 = wcid / ecnt3;
+    let elem_off3 = wcid % ecnt3;
+    let page_off4 = wcid / ecnt4;
+    let elem_off4 = wcid % ecnt4;
+
+    let fid2 = base_fid2 + page_off2;
+    let eid2 = elem_off2;
+    let fid3 = base_fid3 + page_off3;
+    let eid3 = elem_off3 * 2; // vendor: idx==2 uses element_offset*2
+    let fid4 = base_fid4 + page_off4;
+    let eid4 = elem_off4;
+    (fid2, eid2, fid3, eid3, fid4, eid4)
+}
+
+/// WTBL1 DW3/DW4 cross-link words for a WCID (little-endian field packing).
+fn wtbl_dw3_dw4(wcid: u32) -> (u32, u32) {
+    let (fid2, eid2, fid3, eid3, fid4, eid4) = wtbl_entry234(wcid);
+    // DW3: wtbl2_fid[10:0] | wtbl2_eid[15:11] | wtbl4_fid[26:16]
+    let dw3 = fid2 | (eid2 << 11) | (fid4 << 16);
+    // DW4: wtbl3_fid[10:0] | wtbl3_eid[16:11] | wtbl4_eid[22:17]
+    let dw4 = fid3 | (eid3 << 11) | (eid4 << 17);
+    (dw3, dw4)
+}
+
 pub fn build_wtbl_sta_sequence(
     bssid: &[u8; 6],
     out_ops: &mut [crate::ffi::RegWriteOp],
@@ -109,17 +155,17 @@ pub fn build_wtbl_sta_sequence(
     // DW0: rv=1 (bit 28), rc_a2=1 (bit 29), rc_a1=1 (bit 22), muar_idx=0x0E (bits 16..21), addr_4=0xFF, addr_5=0xFF
     let dw0_mcast = (1 << 29) | (1 << 28) | (1 << 22) | (0x0E << 16) | (0xFF << 8) | 0xFF;
     let dw1_mcast = 0xFFFF_FFFF;
-    let dw2_mcast = 0x0000_0000; // WTBL_CIPHER_NONE, adm=0
-    let dw3_mcast = (1 << 29) | (1 << 28); // i_psm=1, du_i_psm=1
-    let dw4_mcast = 0x0000_0000;
+    let dw2_mcast = 0x0000_0000; // WTBL_CIPHER_NONE, adm=0 (key installed later)
+    let (dw3_mcast, dw4_mcast) = wtbl_dw3_dw4(0);
 
     // Entry 1 (Associated AP unicast entry at 0x28014):
-    // DW0: rv=1 (bit 28), rc_a2=1 (bit 29), muar_idx=0x00 (bits 16..21), addr_4=bssid[4], addr_5=bssid[5]
+    // DW0: rv=1 (bit 28), rc_a2=1 (bit 29), addr_4=bssid[4], addr_5=bssid[5]
     let dw0_ap = (1 << 29) | (1 << 28) | ((bssid[5] as u32) << 8) | (bssid[4] as u32);
     let dw1_ap = u32::from_le_bytes([bssid[0], bssid[1], bssid[2], bssid[3]]);
-    let dw2_ap = 0x4030_0000; // WTBL_CIPHER_NONE, adm=1 (bit 30), ht=1 (bit 21), qos=1 (bit 20)
-    let dw3_ap = (1 << 29) | (1 << 28) | (1 << 11); // i_psm=1, du_i_psm=1, wtbl2_eid=1
-    let dw4_ap = (1 << 23) | (1 << 17) | (2 << 11); // partial_aid=1, wtbl4_eid=1, wtbl3_eid=2
+    // DW2: qos=1 (bit 27), ht=1 (bit 28), baf_en=1 (bit 20), dyn_bw=1 (bit 21).
+    // adm/cipher_suit are written by set_key once the PTK is installed.
+    let dw2_ap = (1 << 28) | (1 << 27) | (1 << 21) | (1 << 20);
+    let (dw3_ap, dw4_ap) = wtbl_dw3_dw4(1);
 
     out_ops[0] = crate::ffi::RegWriteOp {
         addr: WTBL1_BASE,
@@ -234,6 +280,21 @@ mod tests {
     }
 
     #[test]
+    fn test_wtbl_entry234_crosslinks() {
+        // Lock in vendor mt_wtbl_get_entry234 / mt_wtbl_init derived FID/EID.
+        // WCID 0
+        assert_eq!(wtbl_entry234(0), (0, 0, 64, 0, 128, 0));
+        assert_eq!(wtbl_dw3_dw4(0), (0x0080_0000, 0x0000_0040));
+        // WCID 1
+        assert_eq!(wtbl_entry234(1), (0, 1, 64, 2, 128, 1));
+        assert_eq!(wtbl_dw3_dw4(1), (0x0080_0800, 0x0002_1040));
+        // Spot-check a higher WCID to confirm page arithmetic.
+        assert_eq!(wtbl_entry234(2), (1, 0, 65, 0, 128, 2));
+        assert_eq!(wtbl_dw3_dw4(2), (0x0080_0001, 0x0004_0041));
+        assert_eq!(wtbl_entry234(3), (1, 1, 65, 2, 128, 3));
+    }
+
+    #[test]
     fn test_build_wtbl_sta_sequence() {
         let bssid = [0xFC, 0x34, 0x97, 0x19, 0x0E, 0x01];
         let mut ops = [crate::ffi::RegWriteOp::default(); 16];
@@ -243,7 +304,7 @@ mod tests {
         let written = res.unwrap();
         assert_eq!(written, 12);
 
-        // Entry 0 Broadcast (0x28000)
+        // Entry 0 Broadcast (0x28000) — cross-links via wtbl_dw3_dw4(0)
         assert_eq!(ops[0].addr, 0x0002_8000);
         assert_eq!(
             ops[0].val,
@@ -254,21 +315,21 @@ mod tests {
         assert_eq!(ops[2].addr, 0x0002_8008);
         assert_eq!(ops[2].val, 0x0000_0000);
         assert_eq!(ops[3].addr, 0x0002_800C);
-        assert_eq!(ops[3].val, 0x3000_0000);
+        assert_eq!(ops[3].val, 0x0080_0000); // wtbl_dw3_dw4(0).0
         assert_eq!(ops[4].addr, 0x0002_8010);
-        assert_eq!(ops[4].val, 0x0000_0000);
+        assert_eq!(ops[4].val, 0x0000_0040); // wtbl_dw3_dw4(0).1
 
-        // Entry 1 AP BSSID (0x28014)
+        // Entry 1 AP BSSID (0x28014) — cross-links via wtbl_dw3_dw4(1)
         assert_eq!(ops[5].addr, 0x0002_8014);
         assert_eq!(ops[5].val, (1 << 29) | (1 << 28) | (0x01 << 8) | 0x0E);
         assert_eq!(ops[6].addr, 0x0002_8018);
         assert_eq!(ops[6].val, 0x1997_34FC);
         assert_eq!(ops[7].addr, 0x0002_801C);
-        assert_eq!(ops[7].val, 0x4030_0000);
+        assert_eq!(ops[7].val, 0x1830_0000); // qos|ht|baf_en|dyn_bw
         assert_eq!(ops[8].addr, 0x0002_8020);
-        assert_eq!(ops[8].val, 0x3000_0800);
+        assert_eq!(ops[8].val, 0x0080_0800); // wtbl_dw3_dw4(1).0
         assert_eq!(ops[9].addr, 0x0002_8024);
-        assert_eq!(ops[9].val, 0x0082_1000);
+        assert_eq!(ops[9].val, 0x0002_1040); // wtbl_dw3_dw4(1).1
 
         // Flush WTBL1OR (0x2A300)
         assert_eq!(ops[10].addr, 0x0002_A300);

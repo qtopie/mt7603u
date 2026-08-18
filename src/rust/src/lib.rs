@@ -625,6 +625,33 @@ pub unsafe extern "C" fn mt7603_rust_build_radio_on_off_cmd(
     }
 }
 
+/// Constructs an EXT_CMD_EDCA_SET (0x27) MCU command frame that programs the
+/// per-AC EDCA/WMM contention parameters for all four access categories.
+/// Required for the LMAC TX scheduler to emit data frames (EP 0x05 / AC0);
+/// without it data frames are silently dropped.
+///
+/// # Safety
+/// Caller must ensure `out_buf` points to writeable memory of at least `max_out_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn mt7603_rust_build_edca_set_cmd(
+    seq: u8,
+    out_buf: *mut u8,
+    max_out_len: usize,
+    out_written: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_written.is_null() {
+        return -22; // -EINVAL
+    }
+    let slice = core::slice::from_raw_parts_mut(out_buf, max_out_len);
+    match mcu::build_edca_set_cmd(seq, slice) {
+        Ok(written) => {
+            *out_written = written;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
 /// Constructs a Channel Privilege MCU command frame (cid=0x20).
 ///
 /// # Safety

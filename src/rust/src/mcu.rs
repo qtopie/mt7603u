@@ -17,6 +17,7 @@ pub const MT_RESTART_DL_REQ: u8 = 0xEF;
 pub const EXT_CID: u8 = 0xED;
 pub const EXT_CMD_NA: u8 = 0;
 pub const EXT_CMD_RADIO_ON_OFF_CTRL: u8 = 0x05;
+pub const EXT_CMD_EDCA_SET: u8 = 0x27;
 
 // Packet type / set-query constants
 pub const PKT_ID_CMD: u8 = 0xA0;
@@ -492,6 +493,82 @@ pub fn build_radio_on_off_cmd(on: bool, seq: u8, out_buf: &mut [u8]) -> Result<u
     )
 }
 
+/// Standard 802.11 WMM EDCA defaults, indexed by WMM ACI
+/// (0=AC_BE, 1=AC_BK, 2=AC_VI, 3=AC_VO). These are the canonical EDCA
+/// parameter values the vendor `AsicSetAllWmmParam` applies at init
+/// (hw_ctrl/cmm_asic_mt.c:1584) and that mainline mac80211 uses for the
+/// default WMM AC parameters.
+const WMM_EDCA_AIFSN: [u8; 4] = [3, 7, 2, 2];
+const WMM_EDCA_CWMIN: [u8; 4] = [4, 4, 3, 2];
+const WMM_EDCA_CWMAX: [u8; 4] = [10, 10, 4, 3];
+const WMM_EDCA_TXOP: [u16; 4] = [0, 0, 0x60, 0x2F];
+
+/// Vendor `wmm_aci_2_hw_ac_queue[0..4]` (mac/mt_mac.c:700) maps WMM ACI to the
+/// hardware AC queue index. This is the array position used for
+/// `rAcParam[]` in `CMD_EDCA_SET_T`:
+///   0:QID_AC_BE -> Q_IDX_AC1 (1)
+///   1:QID_AC_BK -> Q_IDX_AC0 (0)
+///   2:QID_AC_VI -> Q_IDX_AC2 (2)
+///   3:QID_AC_VO -> Q_IDX_AC3 (3)
+const WMM_ACI_TO_HW_QUEUE: [usize; 4] = [1, 0, 2, 3];
+
+/// Builds an EXT_CMD_EDCA_SET command frame (cid=0xED, ext_cid=0x27).
+///
+/// Configures EDCA/WMM contention parameters for all four access categories.
+/// Our driver enables every TX queue via `ARB_TQCR0 = 0xFFFF_FFFF` but never
+/// programs the per-AC EDCA table — without it the LMAC TX scheduler has no
+/// AIFS/CW/TxOP for the data AC (EP 0x05 / AC0) and silently drops data
+/// frames (the 4-way handshake M2 never reaches the air). Mgmt frames use a
+/// separate always-on queue, which is why scans/assoc work but the handshake
+/// stalls. This command mirrors vendor `AsicSetAllWmmParam` /
+/// `CmdEdcaParameterSet` (cmd sent via `AndesInitCmdMsg(..., EXT_CMD_ID_EDCA_SET=0x27, ...)`).
+///
+/// Payload = sizeof(CMD_EDCA_SET_T) = 4 + 4*8 = 36 bytes:
+///   [0]  ucTotalNum = CMD_EDCA_AC_MAX (4)
+///   [1..4] aucReserve[3]
+///   then 4 × TX_AC_PARAM_T (8 bytes each):
+///     [0] ucAcNum      = WMM ACI (0..3)
+///     [1] ucVaildBit   = CMD_EDCA_ALL_BITS (0x0F)
+///     [2] ucAifs       = WMM_EDCA_AIFSN[ac]
+///     [3] ucWinMin     = (1 << Cwmin) - 1
+///     [4..5] u2WinMax  = (1 << Cwmax) - 1  (LE16)
+///     [6..7] u2Txop    = WMM_EDCA_TXOP[ac] (LE16)
+///   rAcParam[] is indexed by the hardware AC queue
+///   (`WMM_ACI_TO_HW_QUEUE[ac]`) exactly as the vendor arranges it.
+pub fn build_edca_set_cmd(seq: u8, out_buf: &mut [u8]) -> Result<usize, i32> {
+    let mut payload = [0u8; 4 + 4 * 8]; // CMD_EDCA_SET_T
+    payload[0] = 4; // ucTotalNum = CMD_EDCA_AC_MAX
+
+    for ac in 0..4usize {
+        let hw_q = WMM_ACI_TO_HW_QUEUE[ac];
+        let base = 4 + hw_q * 8; // rAcParam[hw_q]
+        payload[base] = ac as u8; // ucAcNum
+        payload[base + 1] = 0x0F; // ucVaildBit = CMD_EDCA_ALL_BITS
+        payload[base + 2] = WMM_EDCA_AIFSN[ac]; // ucAifs
+                                                // ucWinMin = (1 << Cwmin) - 1
+        payload[base + 3] = ((1u16 << (WMM_EDCA_CWMIN[ac] as u16)) as u8).wrapping_sub(1);
+        // u2WinMax = (1 << Cwmax) - 1 (LE16)
+        let win_max = (1u16 << (WMM_EDCA_CWMAX[ac] as u16)) - 1;
+        payload[base + 4..base + 6].copy_from_slice(&win_max.to_le_bytes());
+        // u2Txop (LE16)
+        payload[base + 6..base + 8].copy_from_slice(&WMM_EDCA_TXOP[ac].to_le_bytes());
+    }
+
+    // Runtime-phase command: 32-byte full FW_TXD header (FW_RUN_TIME).
+    // need_rsp=true (need-ACK) like the other runtime EXT commands.
+    build_fw_txd_frame(
+        EXT_CID,
+        P1_Q0,
+        CMD_SET,
+        EXT_CMD_EDCA_SET,
+        seq,
+        true,
+        FW_TXD_FULL_SIZE,
+        &payload,
+        out_buf,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +590,61 @@ mod tests {
         assert_eq!(&out[12..32], &[0u8; 20]);
         assert_eq!(out[32], 1); // ON
         assert_eq!(out[33..36], [0, 0, 0]);
+    }
+
+    #[test]
+    fn test_build_edca_set_cmd() {
+        let mut out = [0u8; 128];
+        let res = build_edca_set_cmd(5, &mut out);
+        assert!(res.is_ok());
+        let len = res.unwrap();
+        assert_eq!(len, 32 + 36); // 32 header + 36 payload
+
+        // FW_TXD framing
+        assert_eq!(out[4], EXT_CID);
+        assert_eq!(out[6], CMD_SET);
+        assert_eq!(out[7], 5); // seq
+        assert_eq!(out[9], EXT_CMD_EDCA_SET);
+        assert_eq!(out[11], EXT_CID_OPTION_NEED_ACK);
+        // reserved 20B block zeroed in 32B header mode
+        assert_eq!(&out[12..32], &[0u8; 20]);
+
+        // CMD_EDCA_SET_T header
+        assert_eq!(out[32], 4); // ucTotalNum = CMD_EDCA_AC_MAX
+        assert_eq!(&out[33..36], [0, 0, 0]); // aucReserve[3]
+
+        // rAcParam[] indexed by HW AC queue (WMM_ACI_TO_HW_QUEUE).
+        // HW queue 0 (Q_IDX_AC0) <- WMM ACI 1 (AC_BK): Aifsn=7, Cwmin=4->15, Cwmax=10->1023, Txop=0
+        let bk = 32 + 4 + 0 * 8;
+        assert_eq!(out[bk], 1); // ucAcNum = AC_BK
+        assert_eq!(out[bk + 1], 0x0F); // ucVaildBit
+        assert_eq!(out[bk + 2], 7); // ucAifs
+        assert_eq!(out[bk + 3], 15); // ucWinMin = (1<<4)-1
+        assert_eq!(&out[bk + 4..bk + 6], &1023u16.to_le_bytes()); // u2WinMax
+        assert_eq!(&out[bk + 6..bk + 8], &0u16.to_le_bytes()); // u2Txop
+
+        // HW queue 1 (Q_IDX_AC1) <- WMM ACI 0 (AC_BE): Aifsn=3, Cwmin=4->15, Cwmax=10->1023, Txop=0
+        let be = 32 + 4 + 1 * 8;
+        assert_eq!(out[be], 0); // ucAcNum = AC_BE
+        assert_eq!(out[be + 2], 3); // ucAifs
+        assert_eq!(out[be + 3], 15); // ucWinMin
+        assert_eq!(&out[be + 4..be + 6], &1023u16.to_le_bytes());
+
+        // HW queue 2 (Q_IDX_AC2) <- WMM ACI 2 (AC_VI): Aifsn=2, Cwmin=3->7, Cwmax=4->15, Txop=0x60
+        let vi = 32 + 4 + 2 * 8;
+        assert_eq!(out[vi], 2); // ucAcNum = AC_VI
+        assert_eq!(out[vi + 2], 2); // ucAifs
+        assert_eq!(out[vi + 3], 7); // ucWinMin = (1<<3)-1
+        assert_eq!(&out[vi + 4..vi + 6], &15u16.to_le_bytes()); // u2WinMax
+        assert_eq!(&out[vi + 6..vi + 8], &0x60u16.to_le_bytes()); // u2Txop
+
+        // HW queue 3 (Q_IDX_AC3) <- WMM ACI 3 (AC_VO): Aifsn=2, Cwmin=2->3, Cwmax=3->7, Txop=0x2F
+        let vo = 32 + 4 + 3 * 8;
+        assert_eq!(out[vo], 3); // ucAcNum = AC_VO
+        assert_eq!(out[vo + 2], 2); // ucAifs
+        assert_eq!(out[vo + 3], 3); // ucWinMin = (1<<2)-1
+        assert_eq!(&out[vo + 4..vo + 6], &7u16.to_le_bytes()); // u2WinMax
+        assert_eq!(&out[vo + 6..vo + 8], &0x2Fu16.to_le_bytes()); // u2Txop
     }
 
     #[test]

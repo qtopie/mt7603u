@@ -44,6 +44,7 @@ struct mt7603_tx_params {
     uint8_t preamble;   /* SHORT_PREAMBLE(0)/LONG_PREAMBLE(1) */
     uint8_t bw;         /* BW_20(0)/BW_40(1) */
     uint16_t pkt_len;   /* 802.11 frame length excluding TXD */
+    uint8_t protect_frm; /* 1 = 802.11-protected (CCMP by HW), TMAC_TXD_1 bit 23 */
 };
 
 struct mt7603_sta_bss_info {
@@ -79,6 +80,7 @@ extern int mt7603_rust_build_chan_switch_cmd(uint8_t ctrl_ch, uint8_t central_ch
 extern int mt7603_rust_build_tx_power_ctrl_cmd(const uint8_t *eeprom, size_t eeprom_len, uint8_t central_ch, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_ch_privilege_cmd(uint8_t channel, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_radio_on_off_cmd(bool on, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
+extern int mt7603_rust_build_edca_set_cmd(uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_efuse_buffer_mode_cmd(const uint8_t *eeprom, size_t eeprom_len, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 
 int mt7603_usb_send_cmd(struct usb_device *udev, const uint8_t *frame, size_t frame_len);

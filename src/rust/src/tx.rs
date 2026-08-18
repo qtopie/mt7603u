@@ -85,13 +85,14 @@ pub fn build_txwi(params: &TxParams, out_buf: &mut [u8]) -> Result<usize, i32> {
     // ---- DWORD 1 ----
     // [7:0] wlan_idx, [12:8] hdr_info = hdr_len>>1, [14:13] hdr_format = NOR_80211(2),
     // [15] ft = LONG(1), [18:16] hdr_pad, [19] no_ack, [22:20] tid (0),
-    // [23] protect_frm (0), [31:26] own_mac (0)
+    // [23] protect_frm, [31:26] own_mac (0)
     let dw1 = (params.pid as u32 & 0xff)
         | (((hdr_len >> 1) & 0x1f) << 8)
         | (TMI_HDR_FT_NOR_80211 << 13)
         | (TMI_FT_LONG << 15)
         | ((hdr_pad & 0x07) << 16)
-        | ((params.no_ack as u32 & 0x1) << 19);
+        | ((params.no_ack as u32 & 0x1) << 19)
+        | ((params.protect_frm as u32 & 0x1) << 23);
 
     // ---- DWORD 2 ----
     // [3:0] sub_type, [5:4] frm_type, [6..9] ndp/ndpa/sounding/rts (0), [10] bc_mc_pkt,
@@ -163,6 +164,7 @@ mod tests {
             preamble: 1,  // LONG_PREAMBLE
             bw: 0,        // BW_20
             pkt_len,
+            protect_frm: 0,
         }
     }
 
@@ -263,6 +265,7 @@ mod tests {
             preamble: 1,  // LONG_PREAMBLE
             bw: 0,        // BW_20
             pkt_len: 155,
+            protect_frm: 1, // CCMP-protected (EAPOL M2)
         };
         let mut buf = [0u8; 32];
         assert_eq!(build_txwi(&params, &mut buf), Ok(32));
@@ -271,11 +274,12 @@ mod tests {
         let dw0 = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         assert_eq!(dw0 & 0xffff, 189, "tx_byte_cnt");
 
-        // DW1: wlan_idx=1, hdr_info=13 (26>>1), hdr_pad=2
+        // DW1: wlan_idx=1, hdr_info=13 (26>>1), hdr_pad=2, protect_frm=1
         let dw1 = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
         assert_eq!(dw1 & 0xff, 1, "wlan_idx");
         assert_eq!((dw1 >> 8) & 0x1f, 13, "hdr_info");
         assert_eq!((dw1 >> 16) & 0x7, 2, "hdr_pad");
+        assert_eq!((dw1 >> 23) & 0x1, 1, "protect_frm");
 
         // DW2: sub_type=8, frm_type=2, bc_mc_pkt=0, ba_disable=1, fix_rate=1
         let dw2 = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);

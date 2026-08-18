@@ -77,6 +77,10 @@ pub struct TxParams {
     pub bw: u8,
     /// 802.11 frame length in bytes (excluding TXD).
     pub pkt_len: u16,
+    /// 1 if the frame must be 802.11-protected (CCMP-encrypted by hardware).
+    /// Maps to TMAC_TXD_1 `protect_frm` (bit 23). Set from
+    /// `IEEE80211_TX_CTL_PROTECTED` by the C TX path.
+    pub protect_frm: u8,
 }
 
 #[repr(C)]

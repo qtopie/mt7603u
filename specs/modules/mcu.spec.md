@@ -43,7 +43,7 @@ int hdrlen = dev->mcu_running ? sizeof(struct mt7603_mcu_txd) : 12;
 ```
 `dev->mcu_running = true` 在固件启动完成、`mt76_poll_msec(MT_TOP_MISC2, BIT(1))` 通过后设置（mt7603/mcu.c:206）。`struct mt7603_mcu_txd`（mt7603/mcu.h:6-19）字段布局与厂商一致并含 `au4_d3_to_d7_rev[5]`，`__packed __aligned(4)` → **32B**。`__mt76_mcu_msg_alloc` 分配时对整个 skb head 做 `memset(skb->head, 0, len)`，保留字段被清零。
 
-**结论（本驱动契约）：** 下载期命令（`CmdAddressLenReq`/`CmdFwStartReq`/`CmdRestartDLReq`/`CmdFwScatter`）用 **12B** 头；运行期命令（`CmdChannelSwitch`/`CmdSetTxPowerCtrl`/`CmdRadioOnOffCtrl`/`CmdEfusBufferModeSet`/`CmdChPrivilege`）用 **32B** 头（12B 字段 + 20B 保留清零）。
+**结论（本驱动契约）：** 下载期命令（`CmdAddressLenReq`/`CmdFwStartReq`/`CmdRestartDLReq`/`CmdFwScatter`）用 **12B** 头；运行期命令（`CmdChannelSwitch`/`CmdSetTxPowerCtrl`/`CmdRadioOnOffCtrl`/`CmdEfusBufferModeSet`/`CmdChPrivilege`/`CmdEdcaParameterSet`）用 **32B** 头（12B 字段 + 20B 保留清零）。
 
 **长度账目（dmesg `bulk-out send len` 观测点）：**
 - channel switch：`32 + 36 + 4 = 72`（错误 12B 时为 52）
@@ -61,6 +61,7 @@ int hdrlen = dev->mcu_running ? sizeof(struct mt7603_mcu_txd) : 12;
 | 3 | `CmdFwStartReq` | `0x02` (`MT_FW_START_REQ`) | `0x8000` | `[le32 0x0000_0001(override), le32 0x100000]` | 是（seq 动态） | 12B |
 | 4 | `CmdRadioOnOffCtrl` | `0xED` (`EXT_CID`, ext=0x05) | `0x8000` | 4 字节 `EXT_CMD_RADIO_ON_OFF_CTRL_T` | 是（seq 动态） | **32B** |
 | 5 | `CmdChannelSwitch` | `0xED` (`EXT_CID`, ext=0x08) | `0x8000` | 36 字节 `EXT_CMD_CHAN_SWITCH_T` | 是（seq 动态） | **32B** |
+| 6 | `CmdEdcaParameterSet` | `0xED` (`EXT_CID`, ext=0x27) | `0x8000` | 36 字节 `CMD_EDCA_SET_T`（4 字节头 + 4×`TX_AC_PARAM_T`） | 是（seq 动态） | **32B** |
 
 - `*` 步骤 0 仅当检测到 RAM 固件已在运行（`TOP_MISC2 & 0x02 == 0x02`，即 re-probe/reconnect）时发送，用于让 MCU 跳回 ROM 代码再重新下载（vendor `AndesMTLoadFwMethod1`）。
 - `seq` 由 `AndesGetCmdMsgSeq` 语义分配：`cmd_seq >= 0xf ? cmd_seq = 1 : cmd_seq++`，`cmd_seq` 初始为 0，故首个 `need_wait` 命令 `seq=1`。
@@ -253,3 +254,30 @@ ROM/Firmware 在 Bulk IN 返回的 `EVENT_RXD` 为 12/16 字节头：
 - **And** `out[32]` 为 `ucCenterChannel = 6`
 - **And** `out[35]` 为 `aucTargetPower[0]`（TX0_G_BAND_TARGET_PWR 低字节）
 - **Mapped Test:** `src/rust/src/mcu.rs:test_build_tx_power_ctrl_cmd`
+
+#### Scenario 12: [SPEC-MCU-012] Build EDCA_SET Command Frame (运行期 32B 头)
+
+EDCA/WMM 每 AC 竞争参数配置命令。本驱动 MAC 初始化仅通过 `ARB_TQCR0=0xFFFF_FFFF` 使能所有 TX 队列，但从未填写 EDCA 参数表；不配置则 LMAC TX 调度器对数据 AC（EP 0x05 / AC0）无 AIFS/CW/TxOP 而静默丢弃数据帧（4-Way 握手 M2 永远不上 air）。命令语义对齐厂商 `AsicSetAllWmmParam` / `CmdEdcaParameterSet`（`mcu/andes_mt.c:3721`，`EXT_CMD_ID_EDCA_SET=0x27`）。
+
+- **Given** 标准 WMM EDCA 默认参数（按 WMM ACI 0=AC_BE,1=AC_BK,2=AC_VI,3=AC_VO）：
+  - Aifsn = [3, 7, 2, 2]、Cwmin = [4, 4, 3, 2]、Cwmax = [10, 10, 4, 3]、Txop = [0, 0, 0x60, 0x2F]
+  - 厂商 `wmm_aci_2_hw_ac_queue[0..4]` = [1, 0, 2, 3]（WMM ACI → 硬件 AC 队列索引）
+  - `ucWinMin = (1 << Cwmin) - 1`、`u2WinMax = (1 << Cwmax) - 1`（LE16）
+  - seq `5`（固件已运行，FW_RUN_TIME）
+- **When** 调用 `mt7603_rust_build_edca_set_cmd(5, out_buf, out_written)`
+- **Then** 函数返回 `0`
+- **And** `out_written` 等于 `68` (32 字节 Header + 36 字节 Payload)
+- **And** `out[0..1]` 包含帧总长度 `68` (小端序)
+- **And** `out[4]` 为 `cid = 0xED` (`EXT_CID`)
+- **And** `out[6]` 为 `set_query = 1` (`CMD_SET`)
+- **And** `out[9]` 为 `ext_cid = 0x27` (`EXT_CMD_EDCA_SET`)
+- **And** `out[11]` 为 `ext_cid_option = 1` (`NEED_ACK`)
+- **And** `out[12..32]` 为 20 字节保留区，全部为 `0`
+- **And** `out[32]` 为 `ucTotalNum = 4`（`CMD_EDCA_AC_MAX`）、`out[33..36]` 为 `aucReserve[3]`（全 0）
+- **And** `rAcParam[]` 按硬件 AC 队列索引摆放（共 4×8=32 字节，从 `out[36]` 起）：
+  - 硬件队列 0（Q_IDX_AC0，对应 WMM ACI 1 = AC_BK）：`ucAcNum=1`、`ucVaildBit=0x0F`、`ucAifs=7`、`ucWinMin=15`、`u2WinMax=1023`(LE16)、`u2Txop=0`(LE16)
+  - 硬件队列 1（Q_IDX_AC1，对应 WMM ACI 0 = AC_BE）：`ucAcNum=0`、`ucVaildBit=0x0F`、`ucAifs=3`、`ucWinMin=15`、`u2WinMax=1023`(LE16)、`u2Txop=0`(LE16)
+  - 硬件队列 2（Q_IDX_AC2，对应 WMM ACI 2 = AC_VI）：`ucAcNum=2`、`ucVaildBit=0x0F`、`ucAifs=2`、`ucWinMin=7`、`u2WinMax=15`(LE16)、`u2Txop=0x60`(LE16)
+  - 硬件队列 3（Q_IDX_AC3，对应 WMM ACI 3 = AC_VO）：`ucAcNum=3`、`ucVaildBit=0x0F`、`ucAifs=2`、`ucWinMin=3`、`u2WinMax=7`(LE16)、`u2Txop=0x2F`(LE16)
+- **Mapped Test:** `src/rust/src/mcu.rs:test_build_edca_set_cmd`
+
