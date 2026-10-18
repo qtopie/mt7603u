@@ -702,3 +702,57 @@ pub unsafe extern "C" fn mt7603_rust_build_ch_privilege_cmd(
         Err(err) => err,
     }
 }
+
+/// Builds the register write sequence to configure RMAC receive filter (`RMAC_RFCR` & `RMAC_RFCR1`).
+///
+/// # Safety
+/// Caller must ensure `ops_buf` points to writeable memory of at least `max_ops` elements.
+#[no_mangle]
+pub unsafe extern "C" fn mt7603_rust_build_rx_filter_sequence(
+    promisc: bool,
+    fcs_fail: bool,
+    ops_buf: *mut RegWriteOp,
+    max_ops: usize,
+    out_count: *mut usize,
+) -> i32 {
+    if ops_buf.is_null() || out_count.is_null() {
+        return -22; // -EINVAL
+    }
+    let slice = core::slice::from_raw_parts_mut(ops_buf, max_ops);
+    match mac::build_rx_filter_sequence(promisc, fcs_fail, slice) {
+        Ok(count) => {
+            *out_count = count;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+/// Builds the register write sequence to configure or tear down an A-MPDU BlockAck session
+/// in `WTBL2 DW15`.
+///
+/// # Safety
+/// Caller must ensure `ops_buf` points to writeable memory of at least `max_ops` elements.
+#[no_mangle]
+pub unsafe extern "C" fn mt7603_rust_build_ba_session_sequence(
+    wcid: u8,
+    tid: u8,
+    ba_size: u8,
+    enable: bool,
+    prev_dw15: u32,
+    ops_buf: *mut RegWriteOp,
+    max_ops: usize,
+    out_count: *mut usize,
+) -> i32 {
+    if ops_buf.is_null() || out_count.is_null() {
+        return -22; // -EINVAL
+    }
+    let slice = core::slice::from_raw_parts_mut(ops_buf, max_ops);
+    match mac::build_ba_session_sequence(wcid, tid, ba_size, enable, prev_dw15, slice) {
+        Ok(count) => {
+            *out_count = count;
+            0
+        }
+        Err(err) => err,
+    }
+}

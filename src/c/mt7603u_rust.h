@@ -83,6 +83,8 @@ extern int mt7603_rust_build_ch_privilege_cmd(uint8_t channel, uint8_t seq, uint
 extern int mt7603_rust_build_radio_on_off_cmd(bool on, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_edca_set_cmd(uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_efuse_buffer_mode_cmd(const uint8_t *eeprom, size_t eeprom_len, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
+extern int mt7603_rust_build_rx_filter_sequence(bool promisc, bool fcs_fail, struct reg_write_op *ops_buf, size_t max_ops, size_t *out_count);
+extern int mt7603_rust_build_ba_session_sequence(uint8_t wcid, uint8_t tid, uint8_t ba_size, bool enable, uint32_t prev_dw15, struct reg_write_op *ops_buf, size_t max_ops, size_t *out_count);
 
 int mt7603_usb_send_cmd(struct usb_device *udev, const uint8_t *frame, size_t frame_len);
 int mt7603_efuse_read_block(struct usb_device *udev, uint16_t addr, uint8_t *data);

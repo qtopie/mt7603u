@@ -46,6 +46,9 @@ struct mt7603u_dev {
     bool beacon_enabled;
     u8 mac_addr[ETH_ALEN];
     u8 current_channel;
+    u8 current_bw;
+    int monitor_count;
+    u64 filter_flags;
     u8 cmd_seq;
     bool running;
     bool eeprom_valid;
@@ -227,6 +230,17 @@ static void mt7603_rx_complete(struct urb *urb)
                                 status->flag |= RX_FLAG_NO_SIGNAL_VAL;
                             }
 
+                            if (rx_info.rate & 0x80) {
+                                status->encoding = RX_ENC_HT;
+                                status->rate_idx = rx_info.rate & 0x1f;
+                                status->bw = (rx_info.rate & 0x40) ? RATE_INFO_BW_40 : RATE_INFO_BW_20;
+                                if (rx_info.rate & 0x20)
+                                    status->enc_flags |= RX_ENC_FLAG_SHORT_GI;
+                            } else if ((rx_info.rate & 0x1f) < 12) {
+                                status->encoding = RX_ENC_LEGACY;
+                                status->rate_idx = rx_info.rate & 0x1f;
+                            }
+
                             /* RMAC_RXD DW2 (bytes 8..11): sec_mode = byte9[7:4],
                              * error bits = byte10[5:2] (cm, clm, icv_err, tkip_mic_err).
                              * When sec_mode != 0 and error bits == 0 on a protected frame,
@@ -346,7 +360,7 @@ static void mt7603_stop_rx(struct mt7603u_dev *dev)
     }
 }
 
-static int mt7603_set_channel(struct mt7603u_dev *dev, u8 channel)
+static int mt7603_set_channel_ext(struct mt7603u_dev *dev, u8 channel, u8 bw, u8 central_ch)
 {
     u8 cmd_buf[128];
     size_t written = 0;
@@ -355,6 +369,10 @@ static int mt7603_set_channel(struct mt7603u_dev *dev, u8 channel)
 
     if (channel < 1 || channel > 14)
         channel = 1;
+    if (central_ch < 1 || central_ch > 14)
+        central_ch = channel;
+    if (bw > 1)
+        bw = 0;
 
     /* Wait briefly for any in-flight mgmt TX on EP 0x08 to drain */
     usb_wait_anchor_empty_timeout(&dev->tx_anchor, 50);
@@ -365,7 +383,7 @@ static int mt7603_set_channel(struct mt7603u_dev *dev, u8 channel)
      * read-modify-write contract used by `AsicSetMacTxRx` (cmm_asic_mt.c)
      * and could stomp bits the firmware owns; drop them entirely. */
     seq = dev->cmd_seq = (dev->cmd_seq % 15) + 1;
-    ret = mt7603_rust_build_chan_switch_cmd(channel, channel, 0, 2, 2, seq, cmd_buf, sizeof(cmd_buf), &written);
+    ret = mt7603_rust_build_chan_switch_cmd(channel, central_ch, bw, 2, 2, seq, cmd_buf, sizeof(cmd_buf), &written);
     if (ret == 0 && written > 0) {
         mt7603_usb_send_cmd(dev->udev, cmd_buf, written);
     }
@@ -391,7 +409,25 @@ static int mt7603_set_channel(struct mt7603u_dev *dev, u8 channel)
     }
 
     dev->current_channel = channel;
+    dev->current_bw = bw;
     return 0;
+}
+
+static inline int mt7603_set_channel(struct mt7603u_dev *dev, u8 channel)
+{
+    return mt7603_set_channel_ext(dev, channel, 0, channel);
+}
+
+static int mt7603_set_chandef(struct mt7603u_dev *dev, const struct cfg80211_chan_def *chandef)
+{
+    u8 ch = chandef->chan ? chandef->chan->hw_value : 1;
+    u8 bw = (chandef->width == NL80211_CHAN_WIDTH_40) ? 1 : 0;
+    u8 central_ch = ch;
+
+    if (bw && chandef->center_freq1 >= 2412) {
+        central_ch = (chandef->center_freq1 - 2407) / 5;
+    }
+    return mt7603_set_channel_ext(dev, ch, bw, central_ch);
 }
 
 static int mt7603_mac80211_start(struct ieee80211_hw *hw)
@@ -517,6 +553,14 @@ static int mt7603_mac80211_add_interface(struct ieee80211_hw *hw, struct ieee802
     size_t written = 0;
     pr_info("mt7603u: add_interface requested (type=%d addr=%pM)\n", vif->type, vif->addr);
 
+    if (vif->type == NL80211_IFTYPE_MONITOR) {
+        dev->monitor_count++;
+        if (dev->running && mt7603_rust_build_rx_filter_sequence(true, (dev->filter_flags & FIF_FCSFAIL) != 0, ops, 4, &written) == 0 && written > 0) {
+            mt7603_execute_reg_ops(dev->udev, ops, written);
+            pr_info("mt7603u: Promiscuous RX filter enabled for monitor vif\n");
+        }
+    }
+
     if (vif && !is_zero_ether_addr(vif->addr)) {
         if (mt7603_rust_build_own_mac_sequence(vif->addr, ops, 32, &written) == 0 && written > 0) {
             mt7603_execute_reg_ops(dev->udev, ops, written);
@@ -539,6 +583,18 @@ static void mt7603_mac80211_remove_interface(struct ieee80211_hw *hw, struct iee
 {
     struct mt7603u_dev *dev = hw->priv;
     pr_info("mt7603u: remove_interface requested (type=%d)\n", vif->type);
+    if (vif->type == NL80211_IFTYPE_MONITOR) {
+        if (dev->monitor_count > 0)
+            dev->monitor_count--;
+        if (dev->monitor_count == 0 && dev->running) {
+            struct reg_write_op ops[4];
+            size_t written = 0;
+            if (mt7603_rust_build_rx_filter_sequence(false, false, ops, 4, &written) == 0 && written > 0) {
+                mt7603_execute_reg_ops(dev->udev, ops, written);
+                pr_info("mt7603u: Promiscuous RX filter disabled\n");
+            }
+        }
+    }
     if (vif == dev->ap_vif) {
         dev->beacon_enabled = false;
         cancel_delayed_work_sync(&dev->beacon_work);
@@ -553,9 +609,9 @@ static int mt7603_mac80211_config(struct ieee80211_hw *hw, int radio_idx, u32 ch
     if (hw->conf.chandef.chan) {
         u8 ch = hw->conf.chandef.chan->hw_value;
         if ((changed & IEEE80211_CONF_CHANGE_CHANNEL) || ch != dev->current_channel) {
-            pr_info("mt7603u: config() chan=%d freq=%d changed=0x%x\n",
-                    ch, hw->conf.chandef.chan->center_freq, changed);
-            mt7603_set_channel(dev, ch);
+            pr_info("mt7603u: config() chan=%d freq=%d changed=0x%x width=%d\n",
+                    ch, hw->conf.chandef.chan->center_freq, changed, hw->conf.chandef.width);
+            mt7603_set_chandef(dev, &hw->conf.chandef);
         }
     } else {
         pr_info("mt7603u: config() no chan\n");
@@ -568,6 +624,11 @@ static void mt7603_mac80211_configure_filter(struct ieee80211_hw *hw,
                                               unsigned int *total_flags,
                                               u64 flags)
 {
+    struct mt7603u_dev *dev = hw->priv;
+    struct reg_write_op ops[4];
+    size_t written = 0;
+
+    dev->filter_flags = flags;
     *total_flags &= FIF_ALLMULTI |
                     FIF_BCN_PRBRESP_PROMISC |
                     FIF_CONTROL |
@@ -575,6 +636,13 @@ static void mt7603_mac80211_configure_filter(struct ieee80211_hw *hw,
                     FIF_FCSFAIL |
                     FIF_PLCPFAIL |
                     FIF_PSPOLL;
+
+    if (dev->running) {
+        bool promisc = (dev->monitor_count > 0) || ((flags & FIF_BCN_PRBRESP_PROMISC) != 0);
+        bool fcs_fail = (flags & FIF_FCSFAIL) != 0;
+        if (mt7603_rust_build_rx_filter_sequence(promisc, fcs_fail, ops, 4, &written) == 0 && written > 0)
+            mt7603_execute_reg_ops(dev->udev, ops, written);
+    }
 }
 
 static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_bss_conf *info, u64 changed)
@@ -767,6 +835,7 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
 {
     struct mt7603u_dev *dev = hw->priv;
     struct ieee80211_hdr *hdr;
+    struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
     struct mt7603_tx_params params;
     u8 txwi[32];
     u16 fc;
@@ -802,9 +871,16 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
      * it selects the offloaded key and stores it in info->control.hw_key, and
      * expects the HW to CCMP-encrypt. Mirror that into the TXWI protect_frm bit
      * so the MAC applies the WTBL3 key for this WCID. */
-    {
-        struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
-        params.protect_frm = (info->control.hw_key != NULL) ? 1 : 0;
+    params.protect_frm = (info->control.hw_key != NULL) ? 1 : 0;
+
+    /* Packet injection or Monitor mode frames */
+    bool is_injected = (info->flags & IEEE80211_TX_CTL_INJECTED) ||
+                       (dev->monitor_count > 0 && !dev->ap_vif);
+    if (is_injected) {
+        params.is_bm = hdr->addr1[0] & 0x01;
+        params.no_ack = (params.is_bm || (info->flags & IEEE80211_TX_CTL_NO_ACK)) ? 1 : 0;
+        params.queue = 0x04; /* EP 0x08 */
+        params.pid = 0;
     }
 
     /* Option #2 diagnostic: dump raw skb bytes at TX entry for data frames —
@@ -823,18 +899,35 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
                     _dp[_di+4], _dp[_di+5], _dp[_di+6], _dp[_di+7]);
     }
 
-    /* Vendor MlmeTransmit rate selection (cmm_data.c:1666-1683):
-     * 2.4G (ch<=14) -> CCK 1M LONG_PREAMBLE, 5G -> OFDM 6M. */
-    if (dev->current_channel > 14) {
+    /* Dynamic rate selection from mac80211 / Minstrel-HT or fallback */
+    if (!is_mgmt && info->control.rates[0].idx >= 0) {
+        if (info->control.rates[0].flags & IEEE80211_TX_RC_MCS) {
+            params.rate_mode = 2; /* MODE_HTMIX */
+            params.rate_mcs = info->control.rates[0].idx & 0x0f;
+            params.bw = (info->control.rates[0].flags & IEEE80211_TX_RC_40_MHZ_WIDTH) ? 1 : dev->current_bw;
+            params.preamble = (info->control.rates[0].flags & IEEE80211_TX_RC_SHORT_GI) ? 2 : 0;
+        } else if (info->control.rates[0].idx < 4) {
+            params.rate_mode = 0; /* MODE_CCK */
+            params.rate_mcs = info->control.rates[0].idx;
+            params.preamble = (info->control.rates[0].flags & IEEE80211_TX_RC_USE_SHORT_PREAMBLE) ? 0 : 1;
+            params.bw = 0;
+        } else {
+            params.rate_mode = 1; /* MODE_OFDM */
+            params.rate_mcs = (info->control.rates[0].idx - 4) & 0x07;
+            params.preamble = 1;
+            params.bw = 0;
+        }
+    } else if (dev->current_channel > 14) {
         params.rate_mode = 1; /* MODE_OFDM */
         params.rate_mcs = 0;  /* 6M */
         params.preamble = 1;  /* LONG_PREAMBLE */
+        params.bw = dev->current_bw;
     } else {
         params.rate_mode = 0; /* MODE_CCK */
         params.rate_mcs = 0;  /* 1M */
         params.preamble = 1;  /* LONG_PREAMBLE */
+        params.bw = dev->current_bw;
     }
-    params.bw = 0; /* BW_20 */
 
     ret = mt7603_rust_build_txwi(&params, txwi, sizeof(txwi));
     if (ret != 0) {
@@ -1121,6 +1214,43 @@ static void mt7603_mac80211_sw_scan_complete(struct ieee80211_hw *hw, struct iee
 
 static int mt7603_mac80211_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_ampdu_params *params)
 {
+    struct mt7603u_dev *dev = hw->priv;
+    struct reg_write_op ops[4];
+    size_t written = 0;
+    u8 wcid = (params->sta && !is_zero_ether_addr(params->sta->addr)) ? 1 : 0;
+    u32 reg = 0x00040000 + (u32)wcid * 64 + 15 * 4;
+    u32 dw15 = 0;
+
+    mt7603_usb_read_reg(dev->udev, reg, &dw15);
+
+    switch (params->action) {
+    case IEEE80211_AMPDU_RX_START:
+        if (params->sta && !is_zero_ether_addr(params->sta->addr)) {
+            u32 lo = (u32)params->sta->addr[0] | ((u32)params->sta->addr[1] << 8) |
+                     ((u32)params->sta->addr[2] << 16) | ((u32)params->sta->addr[3] << 24);
+            u32 hi = (u32)params->sta->addr[4] | ((u32)params->sta->addr[5] << 8) |
+                     ((u32)params->tid << 16) | (1u << 22);
+            mt7603_usb_write_reg(dev->udev, 0x00021868, lo);
+            mt7603_usb_write_reg(dev->udev, 0x0002186C, hi);
+        }
+        break;
+    case IEEE80211_AMPDU_TX_START:
+        return IEEE80211_AMPDU_TX_START_IMMEDIATE;
+    case IEEE80211_AMPDU_TX_OPERATIONAL:
+        if (mt7603_rust_build_ba_session_sequence(wcid, params->tid, params->buf_size ? params->buf_size : 64, true, dw15, ops, 4, &written) == 0 && written > 0)
+            mt7603_execute_reg_ops(dev->udev, ops, written);
+        break;
+    case IEEE80211_AMPDU_TX_STOP_CONT:
+    case IEEE80211_AMPDU_TX_STOP_FLUSH:
+    case IEEE80211_AMPDU_TX_STOP_FLUSH_CONT:
+        if (mt7603_rust_build_ba_session_sequence(wcid, params->tid, 0, false, dw15, ops, 4, &written) == 0 && written > 0)
+            mt7603_execute_reg_ops(dev->udev, ops, written);
+        if (vif && params->sta)
+            ieee80211_stop_tx_ba_cb_irqsafe(vif, params->sta->addr, params->tid);
+        break;
+    default:
+        break;
+    }
     return 0;
 }
 
@@ -1189,6 +1319,21 @@ static struct ieee80211_supported_band mt7603_band_2ghz = {
     .n_channels = ARRAY_SIZE(mt7603_channels_2ghz),
     .bitrates   = mt7603_rates_2ghz,
     .n_bitrates = ARRAY_SIZE(mt7603_rates_2ghz),
+    .ht_cap = {
+        .cap = IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
+               IEEE80211_HT_CAP_SGI_20 |
+               IEEE80211_HT_CAP_SGI_40 |
+               IEEE80211_HT_CAP_TX_STBC |
+               (1 << IEEE80211_HT_CAP_RX_STBC_SHIFT) |
+               IEEE80211_HT_CAP_DSSSCCK40,
+        .ampdu_factor = IEEE80211_HT_MAX_AMPDU_64K,
+        .ampdu_density = IEEE80211_HT_MPDU_DENSITY_4,
+        .mcs = {
+            .rx_mask = { 0xff, 0xff }, /* MCS 0..15 (2x2 MIMO 300M) */
+            .tx_params = IEEE80211_HT_MCS_TX_DEFINED,
+        },
+        .ht_supported = true,
+    },
 };
 
 int mt7603_register_mac80211(struct usb_interface *intf, struct ieee80211_hw **out_hw)
@@ -1277,8 +1422,10 @@ int mt7603_register_mac80211(struct usb_interface *intf, struct ieee80211_hw **o
 
     SET_IEEE80211_PERM_ADDR(hw, dev->mac_addr);
 
-    // Supported interface modes: Station & AP
-    hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) | BIT(NL80211_IFTYPE_AP);
+    // Supported interface modes: Station, AP & Monitor
+    hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
+                                 BIT(NL80211_IFTYPE_AP) |
+                                 BIT(NL80211_IFTYPE_MONITOR);
     hw->wiphy->bands[NL80211_BAND_2GHZ] = &mt7603_band_2ghz;
 
     ret = ieee80211_register_hw(hw);

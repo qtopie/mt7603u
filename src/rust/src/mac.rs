@@ -416,6 +416,86 @@ pub fn build_channel_sequence(
     Ok(seq.len())
 }
 
+/// Builds the register write sequence to configure RMAC receive filter (`RMAC_RFCR` & `RMAC_RFCR1`).
+/// Mapped Spec: `specs/modules/mac.spec.md` Scenario 6 (`[SPEC-MAC-006]`)
+pub fn build_rx_filter_sequence(
+    promisc: bool,
+    fcs_fail: bool,
+    out_ops: &mut [RegWriteOp],
+) -> Result<usize, i32> {
+    if out_ops.len() < 2 {
+        return Err(-28); // -ENOSPC
+    }
+
+    let rfcr = if promisc {
+        if fcs_fail {
+            0x0000_0004 // RX_PROMISCUOUS_MODE (BIT 2), keep FCS error frames
+        } else {
+            0x0000_0006 // RX_PROMISCUOUS_MODE (BIT 2) | DROP_FCS_ERROR_FRAME (BIT 1)
+        }
+    } else {
+        // Normal STA/AP RX filter (AsicSetRxFilter, hw_ctrl/cmm_asic_mt.c:768-781)
+        0x001D_93A2
+    };
+
+    out_ops[0] = RegWriteOp {
+        addr: RMAC_RFCR,
+        val: rfcr,
+    };
+    out_ops[1] = RegWriteOp {
+        addr: RMAC_RFCR1,
+        val: 0x0000_0000,
+    };
+
+    Ok(2)
+}
+
+/// Builds the register write sequence to configure or tear down an A-MPDU BlockAck session
+/// in `WTBL2 DW15` (`0x0004_003C + wcid * 64`).
+/// Mapped Spec: `specs/modules/mac.spec.md` Scenario 7 (`[SPEC-MAC-007]`)
+pub fn build_ba_session_sequence(
+    wcid: u8,
+    tid: u8,
+    ba_size: u8,
+    enable: bool,
+    prev_dw15: u32,
+    out_ops: &mut [RegWriteOp],
+) -> Result<usize, i32> {
+    if tid >= 8 {
+        return Err(-22); // -EINVAL
+    }
+    if out_ops.is_empty() {
+        return Err(-28); // -ENOSPC
+    }
+
+    const BA_RANGE: [u8; 8] = [4, 5, 8, 10, 16, 20, 21, 42];
+    let mut idx: u32 = 0;
+    while (idx as usize) < 7 && BA_RANGE[idx as usize] < ba_size {
+        idx += 1;
+    }
+    if idx > 0 && BA_RANGE[idx as usize] > ba_size {
+        idx -= 1;
+    }
+
+    let shift = (tid as u32) * 3;
+    let range_mask = 0x7u32 << shift;
+    let ba_en_bit = 1u32 << (24 + (tid as u32));
+    let reg = 0x0004_0000 + (wcid as u32) * 64 + 15 * 4;
+
+    let mut dw15 = prev_dw15 & !range_mask;
+    if enable {
+        dw15 |= ba_en_bit | ((idx & 0x7) << shift);
+    } else {
+        dw15 &= !ba_en_bit;
+    }
+
+    out_ops[0] = RegWriteOp {
+        addr: reg,
+        val: dw15,
+    };
+    Ok(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +557,63 @@ mod tests {
         assert_eq!(ops[0].val, 0x76430C00);
         assert_eq!(ops[1].addr, RMAC_OMA0R1);
         assert_eq!(ops[1].val, 0x00010103); // [4]=0x03, [5]=0x01, bit 16=1
+    }
+
+    #[test]
+    fn test_rx_filter_sequence() {
+        let mut ops = [RegWriteOp { addr: 0, val: 0 }; 4];
+        assert_eq!(build_rx_filter_sequence(false, false, &mut ops), Ok(2));
+        assert_eq!(
+            ops[0],
+            RegWriteOp {
+                addr: RMAC_RFCR,
+                val: 0x001D_93A2
+            }
+        );
+        assert_eq!(
+            ops[1],
+            RegWriteOp {
+                addr: RMAC_RFCR1,
+                val: 0
+            }
+        );
+
+        assert_eq!(build_rx_filter_sequence(true, false, &mut ops), Ok(2));
+        assert_eq!(
+            ops[0],
+            RegWriteOp {
+                addr: RMAC_RFCR,
+                val: 0x0000_0006
+            }
+        );
+
+        assert_eq!(build_rx_filter_sequence(true, true, &mut ops), Ok(2));
+        assert_eq!(
+            ops[0],
+            RegWriteOp {
+                addr: RMAC_RFCR,
+                val: 0x0000_0004
+            }
+        );
+    }
+
+    #[test]
+    fn test_ba_session_sequence() {
+        let mut ops = [RegWriteOp { addr: 0, val: 0 }; 2];
+        // WCID=1, TID=0, ba_size=64 -> idx=7 (42), reg = 0x0004_007C, ba_en=1<<24, win=7
+        assert_eq!(
+            build_ba_session_sequence(1, 0, 64, true, 0, &mut ops),
+            Ok(1)
+        );
+        assert_eq!(ops[0].addr, 0x0004_007C);
+        assert_eq!(ops[0].val, (1u32 << 24) | 7);
+
+        // Disable TID=0
+        let prev = ops[0].val;
+        assert_eq!(
+            build_ba_session_sequence(1, 0, 64, false, prev, &mut ops),
+            Ok(1)
+        );
+        assert_eq!(ops[0].val, 0);
     }
 }

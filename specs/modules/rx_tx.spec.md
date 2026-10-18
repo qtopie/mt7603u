@@ -142,3 +142,24 @@ Probe Request（STA 主动扫描，ch≤14）场景取值：
 - **And** `buf[8:12]` DW2 `sub_type` 为 `8`, `frm_type` 为 `2`, `bc_mc_pkt` 为 `0`, `ba_disable` 为 `1`, `fix_rate` 为 `1`
 - **And** 返回写入长度 `32`
 - **Mapped Test:** `src/rust/src/tx.rs:test_build_txwi_qos_data_pad`
+
+#### Scenario 7: [SPEC-RXTX-007] Radiotap Rate / MCS / BW / SGI Extraction from Group 3 `RXV1_1ST_CYCLE`
+- **Given** 一个含 Group 3 RxVector (`grp_vld & 0x04`) 的 `RMAC_RXD` 帧，其 `Group3 + 0` (`RXV1_1ST_CYCLE`, `mt_mac.h:611-625`) 包含 `TxRate[6:0]`, `TxMode[14:12]` (`0=CCK, 1=OFDM, 2=HTMIX, 3=HTGF`), `FrMode[16:15]` (`0=BW20, 1=BW40`), `HtShortGi[19]`
+- **When** 调用 `mt7603_rust_parse_rx_frame(data, len, rssi_offset, out)`
+- **Then** `out->rate` 按如下紧凑位域编码返回给 C 层以填充 `ieee80211_rx_status`（供 Monitor 模式 Radiotap 注入）：
+  - Bit 7 (`0x80`): `1` 表示 HT MCS (`TxMode >= 2`)，`0` 表示 Legacy CCK/OFDM
+  - Bit 6 (`0x40`): `1` 表示 40MHz (`FrMode == 1`)，`0` 表示 20MHz
+  - Bit 5 (`0x20`): `1` 表示 Short GI (`HtShortGi == 1`)
+  - Bits [4:0] (`0x1F`): 当 HT 模式时为 MCS 索引 (`0..15`)；当 Legacy 模式时为 `mt7603_rates_2ghz` 速率表索引 (`0..11`)
+- **Mapped Test:** `src/rust/src/rx.rs:test_parse_rx_radiotap_rate`
+
+#### Scenario 8: [SPEC-RXTX-008] 802.11n 2x2 MIMO (MCS 8~15) & HT40 TXWI Rate Encoding
+- **Given** `TxParams` 指定 `rate_mode = 2 (MODE_HTMIX)`, `rate_mcs = 15` (2x2 MIMO 300Mbps), `bw = 1 (BW_40)`, `preamble = 1 (Short GI)`
+- **When** 调用 `mt7603_rust_build_txwi(params, buf, 32)`
+- **Then** 函数返回 `0`
+- **And** 按厂商 `get_nss_by_mcs` (`mac/mt_mac.c:650-668`) 计算 `nss = 1 + (rate_mcs >> 3) = 2`
+- **And** `DW6` `bw` (bits [10:8]) 等于 `(1 << 2) | 1 = 0x5` (`BW_40`)
+- **And** `DW6` `tx_rate` (bits [29:18]) 等于 `((nss - 1) << 9) | (2 << 6) | 15 = 0x28F`
+- **And** `DW6` `gi` (bit 31) 在 HT 模式且 `preamble & 0x2 != 0` (Short GI) 时置 `1`
+- **Mapped Test:** `src/rust/src/tx.rs:test_build_txwi_ht_2ss_ht40`
+

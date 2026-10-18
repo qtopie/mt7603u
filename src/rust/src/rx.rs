@@ -77,6 +77,48 @@ pub fn parse_rx_frame(buf: &[u8], rssi_offset: i8) -> Result<RxInfo, i32> {
         if ibrssi0 != 0 {
             info.rssi = ibrssi0.saturating_add(rssi_offset);
         }
+
+        // Extract RXV1_1ST_CYCLE (Group3 + 0) rate/MCS/BW/SGI for Radiotap (`mt_mac.h:611-625`)
+        let rxv1_dw0 = u32::from_le_bytes([
+            buf[grp3_off],
+            buf[grp3_off + 1],
+            buf[grp3_off + 2],
+            buf[grp3_off + 3],
+        ]);
+        let tx_rate = (rxv1_dw0 & 0x7f) as u8;
+        let tx_mode = ((rxv1_dw0 >> 12) & 0x07) as u8;
+        let fr_mode = ((rxv1_dw0 >> 15) & 0x03) as u8;
+        let short_gi = ((rxv1_dw0 >> 19) & 0x01) as u8;
+
+        let mut rate_enc: u8 = 0;
+        if fr_mode == 1 {
+            rate_enc |= 0x40; // BW_40
+        }
+        if short_gi != 0 {
+            rate_enc |= 0x20; // Short GI
+        }
+        if tx_mode >= 2 {
+            // HTMIX (2) or HTGF (3): MCS index in bits [4:0]
+            rate_enc |= 0x80 | (tx_rate & 0x0f);
+        } else if tx_mode == 1 {
+            // OFDM: map TMI rate code to mt7603_rates_2ghz index (4..11)
+            let ofdm_idx = match tx_rate & 0x0f {
+                11 => 4,  // 6M
+                15 => 5,  // 9M
+                10 => 6,  // 12M
+                14 => 7,  // 18M
+                9 => 8,   // 24M
+                13 => 9,  // 36M
+                8 => 10,  // 48M
+                12 => 11, // 54M
+                _ => 4,
+            };
+            rate_enc |= ofdm_idx;
+        } else {
+            // CCK: map TMI rate code (0..3 LP, 4..7 SP) to index (0..3)
+            rate_enc |= tx_rate & 0x03;
+        }
+        info.rate = rate_enc;
     }
 
     let total_len = if (rx_byte_cnt as usize) <= buf.len() && rx_byte_cnt > 0 {
@@ -199,5 +241,20 @@ mod tests {
         assert_eq!(info.is_beacon, 0);
         assert_eq!(info.is_data, 1);
         assert_eq!(info.is_crc_error, 0);
+    }
+
+    #[test]
+    fn test_parse_rx_radiotap_rate() {
+        // Group3 offset = 40 when grp_vld = 7
+        let mut buf = [0u8; 128];
+        buf[0] = 128;
+        buf[3] = (0x02 << 5) | (0x07 << 1);
+        // RXV1_1ST_CYCLE: TxRate=15 (MCS15), TxMode=2 (HTMIX), FrMode=1 (BW40), HtShortGi=1
+        let rxv1_dw0: u32 = 15 | (2 << 12) | (1 << 15) | (1 << 19);
+        buf[40..44].copy_from_slice(&rxv1_dw0.to_le_bytes());
+        buf[64] = 0x08;
+
+        let info = parse_rx_frame(&buf, 0).unwrap();
+        assert_eq!(info.rate, 0x80 | 0x40 | 0x20 | 15);
     }
 }

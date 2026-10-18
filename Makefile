@@ -52,6 +52,8 @@ rust_build:
 		-u mt7603_rust_build_radio_on_off_cmd \
 		-u mt7603_rust_build_edca_set_cmd \
 		-u mt7603_rust_build_efuse_buffer_mode_cmd \
+		-u mt7603_rust_build_rx_filter_sequence \
+		-u mt7603_rust_build_ba_session_sequence \
 		--whole-archive $(RUST_LIB) -o $(RUST_OBJ)
 	python3 -c 'with open("$(RUST_OBJ)", "rb") as f: d=bytearray(f.read()); [d.__setitem__(slice(o+8,o+12), (4).to_bytes(4, "little")) for o in range(0, len(d)-24, 8) if int.from_bytes(d[o+8:o+12], "little")==9]; open("$(RUST_OBJ)", "wb").write(d)'
 	objcopy -R .llvmbc -R .llvmcmd $(RUST_OBJ)

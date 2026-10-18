@@ -122,16 +122,23 @@ pub fn build_txwi(params: &TxParams, out_buf: &mut [u8]) -> Result<usize, i32> {
     // ---- DWORD 6 ----
     // [0] fix_rate_mode = TMI_FIX_RATE_BY_TXD(0), [1] rsv (0), [7:2] ant_id (0),
     // [10:8] bw = (1<<2)|BW, [11] spe_en (1), [14:12] ant_pri (0), [15] dyn_bw (0),
-    // [16] ETxBF (0), [17] ITxBF (0), [29:18] tx_rate, [30] ldpc (0), [31] gi (0)
-    let tx_rate = tx_rate_to_tmi(
-        params.rate_mode as u32,
-        params.rate_mcs as u32,
-        0,
-        1,
-        params.preamble as u32,
-    );
+    // [16] ETxBF (0), [17] ITxBF (0), [29:18] tx_rate, [30] ldpc (0), [31] gi
+    let rate_mode = params.rate_mode as u32;
+    let rate_mcs = params.rate_mcs as u32;
+    let nss = if (rate_mode == MODE_HTMIX || rate_mode == MODE_HTGF) && rate_mcs != 32 {
+        1 + (rate_mcs >> 3)
+    } else {
+        1
+    };
+    let tx_rate = tx_rate_to_tmi(rate_mode, rate_mcs, 0, nss, (params.preamble & 0x1) as u32);
+    let gi = if (rate_mode == MODE_HTMIX || rate_mode == MODE_HTGF) && (params.preamble & 0x2) != 0
+    {
+        1u32
+    } else {
+        0u32
+    };
     let bw_field = (1 << 2) | (params.bw as u32 & 0x3);
-    let dw6 = (bw_field << 8) | (1 << 11) | ((tx_rate & 0x0fff) << 18);
+    let dw6 = (bw_field << 8) | (1 << 11) | ((tx_rate & 0x0fff) << 18) | (gi << 31);
 
     // ---- DWORD 7 ---- sch_tx_time = 0, sw_field = 0
 
@@ -304,5 +311,35 @@ mod tests {
             tx_rate_to_tmi(MODE_OFDM, 0, 0, 1, LONG_PREAMBLE),
             (1 << 6) | 11
         );
+    }
+
+    #[test]
+    fn test_build_txwi_ht_2ss_ht40() {
+        let params = TxParams {
+            rate_idx: 15,
+            pid: 1,
+            queue: 0x01, // Q_IDX_AC1
+            hdr_len: 26,
+            frm_type: 2,
+            sub_type: 8,
+            no_ack: 0,
+            is_bm: 0,
+            rate_mode: 2, // MODE_HTMIX
+            rate_mcs: 15, // MCS 15 (2x2 MIMO 300M)
+            preamble: 2,  // Short GI (bit 1)
+            bw: 1,        // BW_40
+            pkt_len: 1400,
+            protect_frm: 0,
+        };
+        let mut buf = [0u8; 32];
+        assert_eq!(build_txwi(&params, &mut buf), Ok(32));
+
+        let dw6 = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+        // bw = (1<<2)|1 = 5 (bits 10:8)
+        assert_eq!((dw6 >> 8) & 0x7, 5, "bw is BW_40");
+        // tx_rate: nss=2 -> (nss-1)<<9 = 1<<9 = 512, mode=2<<6 = 128, mcs=15 -> 512|128|15 = 655
+        assert_eq!((dw6 >> 18) & 0xfff, 655, "HT MCS 15 2SS");
+        // gi: Short GI enabled -> bit 31 = 1
+        assert_eq!((dw6 >> 31) & 0x1, 1, "Short GI bit");
     }
 }

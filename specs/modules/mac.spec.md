@@ -74,3 +74,30 @@
 - **And** 停止路径仅做 MAC/DMA 级关闭：清空 RX 接收环 (`stop_rx`) 与击毙 TX URB (`usb_kill_anchored_urbs`)
 - **Rationale:** 厂商 MT7603 明确不实现 radio on/off 卸载路径 —— `AsicRadioOn/AsicRadioOff = NULL` (`chips/mt7603.c`)，`RT28xxUsbAsicRadioOff` 与 `CmdRadioOnOffCtrl(WIFI_RADIO_OFF)` 均被注释 (`usb_main_dev.c:622`, `rtmp_init_inf.c:1279`)。对仍驻留 RAM 的固件下发 radio-off 会使 MCU 命令接口（`restart-dl`/EP 0x84/0x85）静默失效，导致下一次 insmod 热探测 `-110` 超时。
 - **Mapped Test:** `src/c/mac80211.c` stop 路径（人工硬件回归：`rmmod` + `insmod` 热探测 100% 通过）
+
+### Feature: Monitor Mode & Promiscuous RX Filter Sequence
+
+#### Scenario 6: [SPEC-MAC-006] RMAC RX Filter Sequence (`mt7603_rust_build_rx_filter_sequence`)
+- **Given** `promisc: bool`（是否处于 Monitor / 混杂模式）与 `fcs_fail: bool`（是否保留 FCS 错误帧 `FIF_FCSFAIL`）
+- **When** 调用 `mt7603_rust_build_rx_filter_sequence(promisc, fcs_fail, ops_buf, max_ops, out_count)`
+- **Then** 函数返回 `0` 且 `out_count == 2`：
+  - 当 `promisc == false`（STA/AP 正常模式，对齐厂商 `AsicSetRxFilter` `hw_ctrl/cmm_asic_mt.c:768-781`）：
+    - `ops[0] = { addr: 0x0002_1800 (RMAC_RFCR), val: 0x001D_93A2 }`（清除 `RM_FRAME_REPORT_EN`、`DROP_NOT_MY_BSSID`、`DROP_NOT_IN_MC_TABLE`、`DROP_DIFF_BSSID_BCN`、`DROP_PROBE_REQ`）
+    - `ops[1] = { addr: 0x0002_18A4 (RMAC_RFCR1), val: 0x0000_0000 }`
+  - 当 `promisc == true`（Monitor 混杂模式，`wf_rmac.h:44-45`）：
+    - `ops[0] = { addr: 0x0002_1800 (RMAC_RFCR), val: if fcs_fail { 0x0000_0004 } else { 0x0000_0006 } }`（置位 `RX_PROMISCUOUS_MODE = BIT(2)`，按 `fcs_fail` 控制 `DROP_FCS_ERROR_FRAME = BIT(1)`）
+    - `ops[1] = { addr: 0x0002_18A4 (RMAC_RFCR1), val: 0x0000_0000 }`
+- **Mapped Test:** `src/rust/src/mac.rs:test_rx_filter_sequence`
+
+### Feature: A-MPDU BlockAck Session Configuration
+
+#### Scenario 7: [SPEC-MAC-007] WTBL2 BlockAck Session Register Sequence (`mt7603_rust_build_ba_session_sequence`)
+- **Given** `wcid: u8`, `tid: u8 (0..7)`, `ba_size: u8`, `enable: bool`, 以及当前 `WTBL2 DW15` 寄存器值 `prev_dw15: u32`
+- **When** 调用 `mt7603_rust_build_ba_session_sequence(wcid, tid, ba_size, enable, prev_dw15, ops_buf, max_ops, out_count)`
+- **Then** 函数返回 `0` 且严格遵循厂商 `AsicUpdateBASession` (`hw_ctrl/cmm_asic_mt.c:2840-2868`)：
+  - 按 `ba_range = [4, 5, 8, 10, 16, 20, 21, 42]` 计算小于等于 `ba_size` 的最大索引 `idx (0..7)`；
+  - 计算目标寄存器地址 `reg = 0x0004_0000 + (wcid as u32) * 64 + 15 * 4` (`WTBL2 DW15`)；
+  - 若 `enable == true`：置位 `ba_en` (`(1 << tid) << 24`) 并将 `ba_win_size_tid` 对应 3-bit 槽位 (`0x7 << (tid * 3)`) 更新为 `idx << (tid * 3)`；
+  - 若 `enable == false`：清除 `ba_en` 中对应 `tid` 位及 `ba_win_size_tid` 对应 3-bit 槽位。
+- **Mapped Test:** `src/rust/src/mac.rs:test_ba_session_sequence`
+

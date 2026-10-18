@@ -136,6 +136,21 @@ MT7603U 寄存器通过 USB vendor request 访问。`regops` 必须先经 `mt_ph
 - **`LPON_T0TPCR` (`0x0002_4034`)**: TBTT 0 Timer Period Control Register (`(beacon_period & 0xFFFF) | BIT(31)` where `BIT(31) = TBTTn_CAL_EN`, `cmm_asic_mt.c:1258-1260`).
 - **`LPON_MPTCR0` (`0x0002_405C`)**: Main Periodic Timer Control Register 0 (`0x0000_0099` enables `TBTT0PERIODTIMER_EN | TBTT0TIMEUP_EN | PRETBTT0TIMEUP_EN | PRETBTT0INT_EN`, `cmm_asic_mt.c:1265`).
 
+### 3.9 RMAC RX Filter & A-MPDU BlockAck Registers (`0x0002_1800` / `0x0004_0000`)
+- **`RMAC_RFCR` (`0x0002_1800`)**: RMAC Receive Filter Control Register (`include/mac/mac_mt/wf_rmac.h:42-63`, `cmm_asic_mt.c:768-781`).
+  - Bit [1] (`DROP_FCS_ERROR_FRAME`): Drop frames with FCS errors.
+  - Bit [2] (`RX_PROMISCUOUS_MODE`): Enable promiscuous RX mode (Monitor mode).
+  - Bit [4] (`DROP_PROBE_REQ`): Drop Probe Request frames.
+  - Bit [9] (`DROP_DIFF_BSSID_A3`) / Bit [10] (`DROP_DIFF_BSSID_A2`) / Bit [11] (`DROP_DIFF_BSSID_BCN`) / Bit [17] (`DROP_NOT_MY_BSSID`) / Bit [18] (`DROP_NOT_UC2ME`).
+  - Normal STA/AP filter value: `0x001D_93A2`; Monitor promiscuous value: `0x0000_0006` (or `0x0000_0004` when `FIF_FCSFAIL` is set).
+- **`RMAC_RFCR1` (`0x0002_18A4`)**: RMAC Receive Filter Control Register 1 (`0x0000_0000`).
+- **`BSCR0` (`0x0002_1868`) / `BSCR1` (`0x0002_186C`)**: BA Scoreboard Control Registers (`wf_rmac.h:130-142`, `cmm_asic_mt.c:2735-2741`).
+  - `BSCR0`: Peer MAC address bytes [3:0] (LE).
+  - `BSCR1`: Bits [15:0] Peer MAC bytes [5:4], Bits [19:16] `RST_BA_TID`, Bits [21:20] `RST_BA_SEL`, Bit [22] `START_RST_BA_SB`.
+- **`WTBL2 DW15` (`0x0004_003C + wcid * 64`)**: Per-WCID BlockAck Window & Enable Register (`wf_wtbl.h:393-399`, `cmm_asic_mt.c:2849-2866`).
+  - Bits [23:0] (`ba_win_size_tid`): 3 bits per TID (`idx << (tid * 3)` mapping `ba_range = {4, 5, 8, 10, 16, 20, 21, 42}`).
+  - Bits [31:24] (`ba_en`): `BIT(tid) << 24`.
+
 ## 4. Vendor Request Command Codes (EP0)
 
 USB Vendor Requests 用于通过 Control Transfer 读写寄存器。**地址必须先用 `mt_physical_addr_map` 映射为全局物理地址**，再编码进 request：
