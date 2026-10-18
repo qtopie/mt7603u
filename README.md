@@ -146,6 +146,30 @@ Check the network interface using `iw`:
 iw dev
 ```
 
+### Desktop & NetworkManager Integration
+
+To ensure the wireless adapter is managed by NetworkManager and visible in desktop environments (such as GNOME Network / Wi-Fi settings):
+
+```bash
+# Verify device name (e.g. wlxb0d59d8c8c7a)
+nmcli device status
+
+# Enable NetworkManager management for the interface
+sudo nmcli device set <interface_name> managed yes
+
+# List nearby Wi-Fi access points
+nmcli device wifi list ifname <interface_name>
+
+# Connect to a Wi-Fi network
+nmcli device wifi connect "<SSID>" password "<PASSWORD>" ifname <interface_name>
+```
+
+> [!TIP]
+> When running standalone AP (`hostapd`) or monitor-mode tools (`tcpdump`, `aircrack-ng`), you can temporarily set `managed no` to prevent NetworkManager background scans from interrupting your sessions:
+> ```bash
+> sudo nmcli device set <interface_name> managed no
+> ```
+
 ---
 
 ## 🧪 Testing & Validation
