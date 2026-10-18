@@ -32,7 +32,7 @@ Welcome Agent! You are a core collaborator in this repository. You MUST strictly
 
 ## 6. Reference Guidance (外部参考指引)
 
-开发本驱动时，必须优先参考以下两个外部目录来获取设计决策与寄存器/芯片事实依据。**参考目录为只读资料，禁止修改其中任何文件。**
+开发与维护本驱动时，行为与寄存器事实以本仓库 `specs/` 契约文档（Single Source of Truth）为准。外部背景知识可参考：
 
 ### 6.1 学习笔记: `~/workspace/qtopie.github.io/posts/notes/linux/drivers/`
 Linux 驱动设计理论与 MT76 系列拆解笔记，用于理解架构与术语：
@@ -40,22 +40,6 @@ Linux 驱动设计理论与 MT76 系列拆解笔记，用于理解架构与术�
 - `mt7601u.md`: **MT7601U 深度拆解**（姊妹芯片，架构高度相似）——厂商原版 vs mac80211 主线重构（Kuba），覆盖 MCU/Andes、USB 端点布局、EEPROM/eFuse、RTMP 框架分层。
 - `crescentrose-writing-drivers.md`: Rust + `rusb`(libusb) 编写用户态 USB 驱动的完整路径（可作为 Rust 侧实现模式参考）。
 
-### 6.2 原厂驱动源码: `~/workspace/projects/mt7603u-vendor/` (主参考源 SSOT)
-**`~/workspace/projects/mt7603u-vendor/` 为本驱动芯片行为与寄存器事实的第一且唯一主权威参考目录**。该目录包含 MTK 官方 `MT7603U` 驱动（v1.14，`JEDI.L0.MP1.mt7603u.v1.14`，位于 `vendor` 分支）。**项目体量大，开发时仅参考与 MT7603U 直接相关的部分，严禁修改其中任何文件。** 核心文件映射：
-
-| 关注点 | 参考文件 (相对 `~/workspace/projects/mt7603u-vendor/`) |
-|---|---|
-| 芯片寄存器初始化序列 | `chips/mt7603.c` (BBPInit / init_mac_cr / switch_channel / tx_pwr) |
-| 芯片寄存器宏定义 | `include/chip/mt7603.h` |
-| EEPROM 布局与标定 | `include/eeprom/mt7603_e2p.h` + `eeprom/MT7603*_EEPROM_layout_*.bin` |
-| MCU 固件头 | `include/mcu/mt7603_firmware.h`、`mt7603_e2_firmware.h`、`mt7603_firmware/` |
-| MAC 层 USB 寄存器 | `include/mac/mac_mt/mt_mac_usb.h` 及 `mac/mac_mt/` 相关定义 |
-| USB 设备 ID 表 | `common/rtusb_dev_id.c` (USB ID `0x0E8D:0x7603`) |
-| USB 探测/枚举 | `os/linux/usb_main_dev.c` (`rtusb_probe` / `USBDevConfigInit`) |
-| USB 收发路径 | `os/linux/rt_usb.c`、`rt_usb_util.c`、`common/` 下 `rtusb_bulk*` |
-
-**使用规则：**
-1. 涉及寄存器地址、位域、时序、固件加载、EEPROM 字段、端点路由及 RMAC 过滤规则时，**必须**直接回查 `~/workspace/projects/mt7603u-vendor/` 源码确认事实，禁止凭推测或记忆写值。
-2. 仅参考与 MT7603U 相关的代码路径（`mt7603*`、`mt_mac_usb`、`rt_usb*`、`rtusb_dev_id.c` 中 `#ifdef MT7603` 块）；其他芯片文件仅作历史对比，不作为事实依据。
-3. 移植到 Rust 时，参考其**行为与寄存器值**，重新按 Rust/SDD 规范组织架构，禁止直接复制 C 代码结构。
-4. 硬件 I/O 在 `harness/mocks/` 中 Mock（如 `RegOps` / `UsbBus` trait），原厂驱动的真实访问序列写入 `specs/` 作为契约来源。
+### 6.2 硬件与协议规范 (SSOT)
+- **`specs/` 目录**：包含所有 MT7603U 寄存器映射表（`specs/schemas/registers.md`）、MCU 命令格式（`specs/modules/mcu.spec.md`）、802.11 状态机与收发契约（`specs/modules/`）。
+- 硬件 I/O 在 `harness/mocks/` 中 Mock（如 `RegOps` / `UsbBus` trait），所有硬件访问序列严格依据 `specs/`。

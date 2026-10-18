@@ -44,15 +44,6 @@ For in-depth architectural decisions, see [RFC-0001: Architecture](docs/rfcs/000
 
 ---
 
-## 🌿 Repository Branches
-
-This repository maintains clear isolation between the upstream vendor reference and the modern rewritten driver:
-
-- **`main`**: The active C/Rust driver implementation based on modern Linux `mac80211`.
-- **`vendor`**: The original MediaTek vendor driver codebase (v1.14), preserved as a read-only historical reference.
-
----
-
 ## 📡 Supported Hardware
 
 | Property | Value |
