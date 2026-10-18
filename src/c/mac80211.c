@@ -198,6 +198,21 @@ static void mt7603_rx_complete(struct urb *urb)
                                 status->flag |= RX_FLAG_NO_SIGNAL_VAL;
                             }
 
+                            /* RMAC_RXD DW2 (bytes 8..11): sec_mode = byte9[7:4],
+                             * error bits = byte10[5:2] (cm, clm, icv_err, tkip_mic_err).
+                             * When sec_mode != 0 and error bits == 0 on a protected frame,
+                             * MT7603 RMAC already decrypted the payload and stripped the
+                             * 8-byte CCMP IV and 8-byte MIC in hardware. */
+                            {
+                                u8 sec_mode = (frame_ptr[9] >> 4) & 0x0f;
+                                u8 rx_sec_err = (frame_ptr[10] >> 2) & 0x0f;
+                                if ((fc & IEEE80211_FCTL_PROTECTED) && sec_mode != 0 && rx_sec_err == 0) {
+                                    status->flag |= RX_FLAG_DECRYPTED |
+                                                    RX_FLAG_IV_STRIPPED |
+                                                    RX_FLAG_MIC_STRIPPED;
+                                }
+                            }
+
                             ieee80211_rx(dev->hw, skb);
                         }
                     }
@@ -353,7 +368,7 @@ static int mt7603_set_channel(struct mt7603u_dev *dev, u8 channel)
 static int mt7603_mac80211_start(struct ieee80211_hw *hw)
 {
     struct mt7603u_dev *dev = hw->priv;
-    struct reg_write_op ops[32];
+    struct reg_write_op ops[128];
     u8 *cmd_buf;
     size_t written = 0;
     int ret;
@@ -392,13 +407,13 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
         pr_warn("mt7603u: eFuse EEPROM not available, skipping calibration upload\n");
     }
 
-    ret = mt7603_rust_get_mac_init_sequence(ops, 32, &written);
+    ret = mt7603_rust_get_mac_init_sequence(ops, ARRAY_SIZE(ops), &written);
     if (ret == 0 && written > 0) {
         mt7603_execute_reg_ops(dev->udev, ops, written);
         pr_info("mt7603u: MAC init sequence applied (%zu ops)\n", written);
     }
 
-    ret = mt7603_rust_build_own_mac_sequence(dev->mac_addr, ops, 32, &written);
+    ret = mt7603_rust_build_own_mac_sequence(dev->mac_addr, ops, ARRAY_SIZE(ops), &written);
     if (ret == 0 && written > 0) {
         mt7603_execute_reg_ops(dev->udev, ops, written);
         pr_info("mt7603u: Own MAC sequence applied (%pM)\n", dev->mac_addr);
@@ -406,7 +421,7 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
 
     {
         static const u8 bcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-        ret = mt7603_rust_build_wtbl_sta_sequence(bcast_addr, ops, 32, &written);
+        ret = mt7603_rust_build_wtbl_sta_sequence(bcast_addr, ops, ARRAY_SIZE(ops), &written);
         if (ret == 0 && written > 0) {
             mt7603_execute_reg_ops(dev->udev, ops, written);
             pr_info("mt7603u: WTBL1 default sequence applied (%zu ops)\n", written);
@@ -432,6 +447,11 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
     } else {
         pr_err("mt7603u: EDCA_SET build failed\n");
     }
+
+    /* Configure DMA_TCFR1 (0x00021C84) so TXS-to-Host reports route to
+     * RxRing 0 (EP 0x84, TXS2H_QID=0) with TXS2H_AGG_CNT=1 and TXS2H_TOUT=1
+     * instead of waiting for batch aggregation. */
+    mt7603_usb_write_reg(dev->udev, 0x00021c84, (1u << 8) | (1u << 16));
 
     kfree(cmd_buf);
     mt7603_set_channel(dev, 1);
@@ -576,14 +596,17 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
             ret = mt7603_rust_build_wtbl_sta_sequence(bssid, ops, 32, &written);
             if (ret == 0 && written > 0) {
                 mt7603_execute_reg_ops(dev->udev, ops, written);
+                /* Clear WTBL2 DW15 (BA info) for WCID 1 (0x00040000 + 1*64 + 15*4)
+                 * per vendor AsicUpdateRxWCIDTable (hw_ctrl/cmm_asic_mt.c:3047). */
+                mt7603_usb_write_reg(dev->udev, 0x0004007C, 0);
                 pr_info("mt7603u: WTBL1 STA sequence applied for %pM (%zu ops)\n", bssid, written);
             }
         } else {
             mt7603_usb_write_reg(dev->udev, 0x00021804, 0);
             mt7603_usb_write_reg(dev->udev, 0x00021808, 0);
-            mt7603_usb_write_reg(dev->udev, 0x00028014, 0);
-            mt7603_usb_write_reg(dev->udev, 0x00028018, 0);
-            mt7603_usb_write_reg(dev->udev, 0x0002801C, 0);
+            mt7603_usb_write_reg(dev->udev, 0x00028020, 0);
+            mt7603_usb_write_reg(dev->udev, 0x00028024, 0);
+            mt7603_usb_write_reg(dev->udev, 0x00028028, 0);
             pr_info("mt7603u: Current BSSID & WTBL1 Entry 1 cleared\n");
         }
     }
@@ -629,8 +652,10 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     params.is_bm = hdr->addr1[0] & 0x01;
     /* Probe requests (broadcast) expect no ACK; unicast data expects one. */
     params.no_ack = params.is_bm;
-    /* mgmt frames route through LMAC MGMT queue (Q_IDX_AC4), data through AC0. */
-    params.queue = is_mgmt ? 0x04 : 0x00;
+    /* mgmt frames route through LMAC MGMT queue (Q_IDX_AC4 = 0x04 on EP 0x08).
+     * Data frames on EP 0x05 (WMM0ACBulkOutAddr[0], QueIdx=0 QID_AC_BE) map via
+     * vendor wmm_aci_2_hw_ac_queue[0] to hardware queue Q_IDX_AC1 (0x01). */
+    params.queue = is_mgmt ? 0x04 : 0x01;
     params.pid = params.is_bm ? 0 : 1; /* WCID 1 for associated AP, 0 for broadcast */
     params.rate_idx = 0;
     params.pkt_len = skb->len;
@@ -648,7 +673,7 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
      * BEFORE any hdr_pad insertion or TXD prepend — to verify that mac80211
      * hands us the correct EAPOL/data content. Compare with the URB-submit
      * dump to detect any corruption introduced by the driver's own code path. */
-    if (params.frm_type == 2) {
+    if (mt7603_dbg_rx && params.frm_type == 2) {
         const u8 *_dp = skb->data;
         int _dlen = (int)skb->len < 80 ? (int)skb->len : 80;
         int _di;
@@ -725,6 +750,14 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     skb_push(skb, 32);
     memcpy(skb->data, txwi, 32);
 
+    /* Data path (EP 0x05): rewrite txd_0.tx_byte_cnt to 4-byte aligned
+     * USBDMApktLen per vendor RtmpUSB_FinalWriteTxResource
+     * (common/cmm_data_usb.c:1389-1394) and specs/modules/rx_tx.spec.md §2. */
+    if (!is_mgmt) {
+        u16 usb_dma_pkt_len = (u16)((skb->len + 3) & ~3);
+        put_unaligned_le16(usb_dma_pkt_len, skb->data);
+    }
+
     ep = is_mgmt ? MT7603_MGMT_BULK_OUT : MT7603_DATA_BULK_OUT;
     pad_len = ((skb->len + 3) & ~3) + 4 - skb->len;
     if (skb_tailroom(skb) < pad_len) {
@@ -799,6 +832,7 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
         ret = mt7603_rust_build_wtbl_sta_sequence(sta->addr, ops, 32, &written);
         if (ret == 0 && written > 0) {
             mt7603_execute_reg_ops(dev->udev, ops, written);
+            mt7603_usb_write_reg(dev->udev, 0x0004007C, 0);
             pr_info("mt7603u: WTBL1 STA sequence applied in sta_add for %pM (%zu ops)\n", sta->addr, written);
         }
     }
@@ -811,9 +845,9 @@ static int mt7603_mac80211_sta_remove(struct ieee80211_hw *hw, struct ieee80211_
     pr_info("mt7603u: sta_remove: addr=%pM\n", sta ? sta->addr : NULL);
     mt7603_usb_write_reg(dev->udev, 0x00021804, 0);
     mt7603_usb_write_reg(dev->udev, 0x00021808, 0);
-    mt7603_usb_write_reg(dev->udev, 0x00028014, 0);
-    mt7603_usb_write_reg(dev->udev, 0x00028018, 0);
-    mt7603_usb_write_reg(dev->udev, 0x0002801C, 0);
+    mt7603_usb_write_reg(dev->udev, 0x00028020, 0);
+    mt7603_usb_write_reg(dev->udev, 0x00028024, 0);
+    mt7603_usb_write_reg(dev->udev, 0x00028028, 0);
     return 0;
 }
 

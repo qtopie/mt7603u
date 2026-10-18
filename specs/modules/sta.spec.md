@@ -42,14 +42,17 @@
 - **Rationale:** 固件依赖 Current BSSID 过滤并转发关联 AP 的单播 data 帧（如 EAPOL M1）到 EP 0x84。缺失时 STA 关联成功但 4-way 握手收不到 M1，AP 以 `DISASSOC_DUE_TO_INACTIVITY` (reason=4) 踢出。
 - **Mapped Spec:** 厂商 `AsicSetBssid` (hw_ctrl/cmm_asic_mt.c:574)，寄存器定义 `include/mac/mac_mt/wf_rmac.h:68`
 
-### 2.7 WTBL1 Table & BSSID Sequence Generation (STA 硬件单播接收表项)
+### 2.7 WTBL1 Table & BSSID Sequence Generation (STA 硬件单播接收与发送表项)
 - **Inputs:** `bssid: *const u8`, `ops_buf: *mut RegWriteOp`, `max_ops: usize`, `out_count: *mut usize`
-- **Outputs:** 生成 WTBL1 Entry 0 (广播/通配默认条目, 0x28000) 与 Entry 1 (AP 专用单播条目, 0x28014) 及 WTBL1OR 刷新寄存器配置序列
-  - Entry 0 (0x28000): DW0=`0x304EFF_FF` (`rv=1, rc_a2=1, rc_a1=1, muar_idx=0x0e`), DW1=`0xFFFFFFFF`, DW2=`0x00000000` (Cipher None, adm=0), DW3=`0x30000000` (`i_psm=1, du_i_psm=1`), DW4=`0x00000000`
-  - Entry 1 (0x28014): DW0=`(1<<28)|(1<<29)|(bssid[5]<<8)|bssid[4]`, DW1=`bssid[0..3]`, DW2=`0x40300000` (Cipher None, adm=1 - Address Match Enable, qos=1, ht=1), DW3=`0x30000800` (`i_psm=1, du_i_psm=1, wtbl2_eid=1`), DW4=`0x00821000` (`partial_aid=1, wtbl4_eid=1, wtbl3_eid=2`)
-  - Flush (0x2A300): `WTBL1OR` 写 `0x80000000` (`PSM_W_FLAG` 置位触发硬件表项刷新) 后写 `0x00000000` (清除 `PSM_W_FLAG`)
-- **Rationale:** MT7603 硬件要求单播数据帧（包括未加密的 EAPOL 帧）在 WTBL1 中存在完整 20 字节有效条目 (`rv=1`, `adm=1`, `qos=1`, `ht=1`, DW3 `i_psm/wtbl2_eid`, DW4 `aid/wtbl3_4_eid`) 且 Cipher Suite 匹配（明文阶段设为 NONE），否则硬件直接丢弃单播数据帧导致 4-Way 握手超时断开。
-- **Mapped Spec:** 厂商 `AsicUpdateRxWCIDTable` (hw_ctrl/cmm_asic_mt.c:2874, 2967, 2984-2985, 3005-3044) 与 `mt_hw_tb_init` (mac/mt_mac.c:1845-1867)
+- **Outputs:** 生成 WTBL1 Entry 0 (广播/通配默认条目, `0x28000`) 与 Entry 1 (AP 专用单播条目, `0x28020`，因 `sizeof(struct wtbl_1_struc) = 32 = 0x20`，含 5 个 DW + `UINT32 dummy[3]`) 及 `WTBL1OR` (`0x2A300`) `PSM_W_FLAG` 写使能配置序列（共 12 个寄存器写操作）：
+  - Entry 0 (`0x28000`..`0x28008`): DW0=`0x304EFF_FF` (`rv=1, rc_a2=1, rc_a1=1, muar_idx=0x0e`), DW1=`0xFFFFFFFF`, DW2=`0x00000000` (Cipher None, adm=0)
+  - Entry 1 (`0x28020`..`0x28028`): DW0=`(1<<29)|(1<<28)|(bssid[5]<<8)|bssid[4]`, DW1=`bssid[0..3]`, DW2=`0x58300000` (`adm=1` bit 30, `ht=1` bit 28, `qos=1` bit 27, `dyn_bw=1` bit 21, `baf_en=1` bit 20, `cipher_suit=0` NONE)
+  - Unlock `WTBL1OR` (`0x2A300`): 写 `0x80000000` (`PSM_W_FLAG` 置位，必须在写 DW3/DW4 **之前**开启以解锁 DW3 的 PSM 位域)
+  - Entry 0 DW3/DW4 (`0x2800C`..`0x28010`): DW3=`0x30800000` (`i_psm=1, du_i_psm=1, wtbl4_fid=128, wtbl2_eid=0, wtbl2_fid=0`), DW4=`0x00000040` (`wtbl3_fid=64, wtbl3_eid=0, wtbl4_eid=0`)
+  - Entry 1 DW3/DW4 (`0x2802C`..`0x28030`): DW3=`0x30800800` (`i_psm=1, du_i_psm=1, wtbl4_fid=128, wtbl2_eid=1, wtbl2_fid=0`), DW4=`0x00021040` (`wtbl4_eid=1, wtbl3_eid=2, wtbl3_fid=64`)
+  - Lock `WTBL1OR` (`0x2A300`): 写 `0x00000000` (在 DW3/DW4 写完**之后**清除 `PSM_W_FLAG`)
+- **Rationale:** MT7603 `WTBL_1_STRUC` 结构体含 `wtbl_1_d0..d4` 及 `UINT32 dummy[3]`，单表项跨度为 **32 字节 (`0x20`)** 而非 20 字节 (`0x14`)。若误按 `0x14` 写入，Entry 1 (`0x28020`) 的 DW0/DW1 会被错位的 DW3/DW4 覆盖且 DW2 (`adm=1`)/DW3 (`i_psm=1`)/DW4 未初始化，导致 LMAC 认为 WCID 1 无效/未准入 (`adm=0`) 或处于休眠，静默丢弃所有发往 AP 的单播数据帧（含 4-Way 握手 M2）。同时 `WTBL1OR` (`PSM_W_FLAG`) 必须在写 DW3/DW4 前置位、写后清零，DW3 的 `i_psm/du_i_psm` 方可写入生效。
+- **Mapped Spec:** 厂商 `include/mac/mac_mt/wf_wtbl.h:36-43` (`WTBL_1_STRUC`)、`AsicUpdateRxWCIDTable` (`hw_ctrl/cmm_asic_mt.c:2874, 2967, 2984-2985, 3005-3044`) 与 `mt_wtbl_init` (`mac/mt_mac.c:1819-1867`)
 
 ## 3. Acceptance Criteria (BDD)
 
@@ -113,16 +116,15 @@
 #### Scenario 6: [SPEC-STA-006] Build WTBL1 Sequence for Associated AP
 - **Given** 目标 AP BSSID `fc:34:97:19:0e:01`
 - **When** 调用 `build_wtbl_sta_sequence(&bssid, &mut ops)`
-- **Then** 函数返回 `0` 且 `out_written` 大于等于 12
-- **And** `ops[0]` 写入 `0x00028000` 包含 `(1<<28)|(1<<29)|(1<<22)|0x000E0000|0xFFFF`
-- **And** `ops[5]` 写入 `0x00028014` 包含 `(1<<28)|(1<<29)|((bssid[5]<<8)|bssid[4])`
-- **And** `ops[6]` 写入 `0x00028018` 值为 `0x199734fc`
-- **And** `ops[7]` 写入 `0x0002801C` 值为 `0x40300000` (Cipher None, adm=1, qos=1, ht=1)
-- **And** `ops[8]` 写入 `0x00028020` 值为 `0x30000800` (DW3 i_psm=1, du_i_psm=1, wtbl2_eid=1)
-- **And** `ops[9]` 写入 `0x00028024` 值为 `0x00821000` (DW4 aid=1, wtbl4_eid=1, wtbl3_eid=2)
-- **And** `ops[10]` 写入 `0x0002A300` 值为 `0x80000000` (WTBL1OR PSM_W_FLAG)
-- **And** `ops[11]` 写入 `0x0002A300` 值为 `0x00000000` (WTBL1OR PSM_W_FLAG clear)
+- **Then** 函数返回 `0` 且 `out_written` 等于 12
+- **And** `ops[0..3]` 写入 Entry 0 (`0x00028000`..`0x00028008`)：DW0=`0x304EFFFF`, DW1=`0xFFFFFFFF`, DW2=`0x00000000`
+- **And** `ops[3..6]` 写入 Entry 1 (`0x00028020`..`0x00028028`)：DW0=`0x3000010E`, DW1=`0x199734FC`, DW2=`0x58300000` (`adm=1, ht=1, qos=1, dyn_bw=1, baf_en=1`)
+- **And** `ops[6]` 写入 `0x0002A300` 值为 `0x80000000` (`WTBL1OR` `PSM_W_FLAG` 置位解锁 DW3/DW4)
+- **And** `ops[7..9]` 写入 Entry 0 DW3/DW4 (`0x0002800C`..`0x00028010`)：DW3=`0x30800000` (`i_psm=1, du_i_psm=1, wtbl4_fid=128`), DW4=`0x00000040` (`wtbl3_fid=64`)
+- **And** `ops[9..11]` 写入 Entry 1 DW3/DW4 (`0x0002802C`..`0x00028030`)：DW3=`0x30800800` (`i_psm=1, du_i_psm=1, wtbl4_fid=128, wtbl2_eid=1`), DW4=`0x00021040` (`wtbl4_eid=1, wtbl3_eid=2, wtbl3_fid=64`)
+- **And** `ops[11]` 写入 `0x0002A300` 值为 `0x00000000` (`WTBL1OR` `PSM_W_FLAG` 清零锁定)
 - **Mapped Test:** `src/rust/src/sta.rs:test_build_wtbl_sta_sequence`
+
 
 
 

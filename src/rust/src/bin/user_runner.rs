@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 2. Obtain MAC Init Register Sequence from Rust logic
-    let mut reg_ops = [mt7603u_logic::ffi::RegWriteOp::default(); 32];
+    let mut reg_ops = [mt7603u_logic::ffi::RegWriteOp::default(); 128];
     let count =
         mac::build_mac_init_sequence(&mut reg_ops).map_err(|e| format!("MAC Init Error: {}", e))?;
     println!(

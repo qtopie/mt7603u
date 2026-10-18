@@ -27,7 +27,45 @@ pub const DMA_RCFR0: u32 = 0x0002_1C70;
 pub const DMA_VCFR0: u32 = 0x0002_1C7C;
 pub const WTBL_OFF_RMVTCR: u32 = 0x0002_3008;
 pub const USB_DMA_CFG: u32 = 0x0002_4000;
+pub const FC_FRP: u32 = 0x0000_8138;
+pub const MT_TXTIME_THD_0: u32 = 0x0000_4500;
+pub const MT_TXTIME_THD_1: u32 = 0x0000_4504;
+pub const MT_TXTIME_THD_2: u32 = 0x0000_4508;
+pub const MT_TXTIME_THD_3: u32 = 0x0000_450C;
+pub const MT_TXTIME_THD_4: u32 = 0x0000_4510;
+pub const MT_TXTIME_THD_5: u32 = 0x0000_4514;
+pub const MT_TXTIME_THD_6: u32 = 0x0000_4518;
+pub const MT_TXTIME_THD_7: u32 = 0x0000_451C;
+pub const MT_TXTIME_THD_8: u32 = 0x0000_4520;
+pub const MT_TXTIME_THD_9: u32 = 0x0000_4524;
+pub const MT_TXTIME_THD_10: u32 = 0x0000_4528;
+pub const MT_TXTIME_THD_11: u32 = 0x0000_452C;
+pub const MT_TXTIME_THD_12: u32 = 0x0000_4530;
+pub const MT_TXTIME_THD_13: u32 = 0x0000_4534;
+pub const MT_TXTIME_THD_14: u32 = 0x0000_4538;
+pub const MT_TXTIME_THD_15: u32 = 0x0000_453C;
+pub const MT_PAGE_CNT_0: u32 = 0x0000_4540;
+pub const MT_PAGE_CNT_1: u32 = 0x0000_4544;
+pub const MT_PAGE_CNT_2: u32 = 0x0000_4548;
+pub const MT_PAGE_CNT_3: u32 = 0x0000_454C;
+pub const MT_PAGE_CNT_4: u32 = 0x0000_4550;
+pub const MT_PAGE_CNT_5: u32 = 0x0000_4554;
+pub const MT_PAGE_CNT_7: u32 = 0x0000_455C;
+pub const MT_PAGE_CNT_8: u32 = 0x0000_4560;
+pub const MT_QUEUE_PRIORITY_1: u32 = 0x0000_4580;
+pub const MT_QUEUE_PRIORITY_2: u32 = 0x0000_4584;
+pub const MT_SCH_REG_1: u32 = 0x0000_4588;
+pub const MT_SCH_REG_2: u32 = 0x0000_458C;
 pub const SCH_REG4: u32 = 0x0000_4594;
+pub const MT_GROUP_THD_0: u32 = 0x0000_4598;
+pub const MT_GROUP_THD_1: u32 = 0x0000_459C;
+pub const MT_GROUP_THD_2: u32 = 0x0000_45A0;
+pub const MT_BMAP_0: u32 = 0x0000_45B0;
+pub const MT_BMAP_1: u32 = 0x0000_45B4;
+pub const MT_HIGH_PRIORITY_1: u32 = 0x0000_45BC;
+pub const MT_HIGH_PRIORITY_2: u32 = 0x0000_45C0;
+pub const MT_PRIORITY_MASK: u32 = 0x0000_45C4;
+pub const MT_RSV_MAX_THD: u32 = 0x0000_45C8;
 pub const PSE_CLIENT_TX_PAD_DW2: u32 = 0x000C_0040;
 pub const PSE_CLIENT_TX_PAD_DW3: u32 = 0x000C_0044;
 pub const PSE_CLIENT_TX_PAD_DW4: u32 = 0x000C_0048;
@@ -41,10 +79,164 @@ pub fn build_mac_init_sequence(out_ops: &mut [RegWriteOp]) -> Result<usize, i32>
             addr: USB_DMA_CFG,
             val: 0x0018_0000,
         }, // Enable RxBulkEn & TxBulkEn
+        // AsicDMASchedulerInit(pAd, DMA_SCH_LMAC) (hw_ctrl/cmm_asic_mt.c:6200-6372)
+        // FC_P0 (0x8120) = 0x0288_0288 -> page_cnt = 0x288, page_size = 128
+        RegWriteOp {
+            addr: FC_FRP,
+            val: 0x0000_4037,
+        },
+        RegWriteOp {
+            addr: MT_HIGH_PRIORITY_1,
+            val: 0x5555_5555,
+        },
+        RegWriteOp {
+            addr: MT_HIGH_PRIORITY_2,
+            val: 0x7855_5555,
+        },
+        RegWriteOp {
+            addr: MT_QUEUE_PRIORITY_1,
+            val: 0x2B1A_096E,
+        },
+        RegWriteOp {
+            addr: MT_QUEUE_PRIORITY_2,
+            val: 0x785F_4D3C,
+        },
+        RegWriteOp {
+            addr: MT_PRIORITY_MASK,
+            val: 0xFFFF_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_SCH_REG_1,
+            val: 0x2000_0288,
+        },
+        RegWriteOp {
+            addr: MT_SCH_REG_2,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_0,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_1,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_2,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_3,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_4,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_5,
+            val: 0x0000_0020,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_7,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_PAGE_CNT_8,
+            val: 0x0000_0032,
+        },
+        RegWriteOp {
+            addr: MT_RSV_MAX_THD,
+            val: 0x0000_0288,
+        },
+        RegWriteOp {
+            addr: MT_GROUP_THD_0,
+            val: 0x0000_025A,
+        },
+        RegWriteOp {
+            addr: MT_GROUP_THD_1,
+            val: 0x0000_000E,
+        },
+        RegWriteOp {
+            addr: MT_BMAP_0,
+            val: 0x0080_FF5F,
+        },
+        RegWriteOp {
+            addr: MT_GROUP_THD_2,
+            val: 0x0000_0020,
+        },
+        RegWriteOp {
+            addr: MT_BMAP_1,
+            val: 0x0000_0020,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_0,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_1,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_2,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_3,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_4,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_5,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_6,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_7,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_8,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_9,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_10,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_11,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_12,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_13,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_14,
+            val: 0x000F_FFFF,
+        },
+        RegWriteOp {
+            addr: MT_TXTIME_THD_15,
+            val: 0x000F_FFFF,
+        },
         RegWriteOp {
             addr: SCH_REG4,
-            val: 0x0000_0000,
-        }, // Normal LMAC prediction mode (exit bypass mode)
+            val: 0x0000_0040,
+        }, // Normal DMA scheduler mode + bit 6 (cmm_asic_mt.c:6367)
         RegWriteOp {
             addr: PSE_CLIENT_RXINF,
             val: 0x0000_0007,
@@ -230,14 +422,32 @@ mod tests {
 
     #[test]
     fn test_mac_init_sequence() {
-        let mut ops = [RegWriteOp { addr: 0, val: 0 }; 32];
+        let mut ops = [RegWriteOp { addr: 0, val: 0 }; 128];
         let res = build_mac_init_sequence(&mut ops);
         assert!(res.is_ok());
         let count = res.unwrap();
-        assert!(count > 0);
+        assert!(count > 32);
         assert_eq!(ops[0].addr, USB_DMA_CFG);
         assert!(ops.iter().any(|op| op.addr == AGG_AWSCR));
         assert!(ops.iter().any(|op| op.addr == RMAC_RMACDR));
+        assert!(ops
+            .iter()
+            .any(|op| op.addr == FC_FRP && op.val == 0x0000_4037));
+        assert!(ops
+            .iter()
+            .any(|op| op.addr == MT_SCH_REG_1 && op.val == 0x2000_0288));
+        assert!(ops
+            .iter()
+            .any(|op| op.addr == MT_SCH_REG_2 && op.val == 0x0000_000E));
+        assert!(ops
+            .iter()
+            .any(|op| op.addr == MT_GROUP_THD_0 && op.val == 0x0000_025A));
+        assert!(ops
+            .iter()
+            .any(|op| op.addr == MT_BMAP_0 && op.val == 0x0080_FF5F));
+        assert!(ops
+            .iter()
+            .any(|op| op.addr == SCH_REG4 && op.val == 0x0000_0040));
     }
 
     #[test]

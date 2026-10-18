@@ -75,13 +75,14 @@ Probe Request（STA 主动扫描，ch≤14）场景取值：
 
 > **sn 说明:** 802.11 帧头内的 SEQ 由 mac80211 提供（`mgmt->seq_ctrl`），TXD 的 `sn` 字段置 0 由 HW 忽略（`txd_3->sn_vld=0`），与厂商 STA 扫描行为一致。
 
-### TX 帧长度与 USB 提交契约（`common/cmm_data_usb.c:1712-1805` RtmpUSBMgmtKickOut）
+### TX 帧长度与 USB 提交契约（`common/cmm_data_usb.c:1712-1805` RtmpUSBMgmtKickOut, `1389-1394` RtmpUSB_FinalWriteTxResource）
 - **mgmt 路径（EP 0x08）:** `BulkOutSize = (SrcBufLen + 3) & ~3`，随后 `+= 4`（USB_END_PADDING 尾部 4 零字节）；`padLen = BulkOutSize - SrcBufLen` 清零；TXD 的 `tx_byte_cnt` 保持 `SrcBufLen`（32+帧长）。
-- **数据路径（EP 0x05）:** `tx_byte_cnt` 重写为 4 对齐 `USBDMApktLen`；批量打包按 `tx_byte_cnt + padding` 叠加（`padding=(4-tx_byte_cnt%4)&3`，`rtusb_bulk.c:673-674`）。
-- **端点路由（`chips/mt7603.c:1249-1256` + `rtusb_bulk.c:198-204`）:**
-  - `CommandBulkOutAddr = 0x8`: MT7603 下 **所有 mgmt 帧（MgmtRing/BcnRing/MGMTPIPEIDX）与 MCU 命令**共用
-  - `WMM0ACBulkOutAddr = {0x5, 0x4, 0x6, 0x7, 0x8}`: 数据帧按 AC 路由（AC0=0x5）
+- **数据路径（EP 0x05）:** `tx_byte_cnt` 重写为 4 对齐 `USBDMApktLen = (SrcBufLen + 3) & ~3`（`cmm_data_usb.c:1389-1394`）；随后尾部追加 4 字节零填充（`ThisBulkSize += 4`，`rtusb_bulk.c:1096`）。
+- **端点与硬件队列路由（`chips/mt7603.c:1064-1068` + `mac/mt_mac.c:700-705, 1047-1049`）:**
+  - `CommandBulkOutAddr = 0x8`: MT7603 下 **所有 mgmt 帧（MgmtRing/BcnRing/MGMTPIPEIDX）与 MCU 命令**共用，`q_idx = Q_IDX_AC4 (0x04)`
+  - `WMM0ACBulkOutAddr = {0x5, 0x4, 0x6, 0x7}`: 按 WMM `QueIdx` 映射，其中 `QueIdx=0 (QID_AC_BE)` 走 **`EP 0x05`**，且 `txd_0->q_idx = wmm_aci_2_hw_ac_queue[0] = Q_IDX_AC1 (0x01)`（`QueIdx=1 (QID_AC_BK)` 走 `EP 0x04` 对应 `Q_IDX_AC0 (0x00)`）
   - `DataBulkInAddr = 0x84`、`CommandRspBulkInAddr = 0x85`
+
 
 ## 3. Acceptance Criteria (BDD)
 

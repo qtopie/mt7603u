@@ -544,7 +544,7 @@ static int mt7603u_probe(struct usb_interface *intf, const struct usb_device_id 
     struct usb_device *udev = interface_to_usbdev(intf);
     struct ieee80211_hw *hw = NULL;
     const struct firmware *fw = NULL;
-    struct reg_write_op ops[32];
+    struct reg_write_op ops[128];
     size_t count = 0;
     int ret;
 
@@ -576,7 +576,7 @@ static int mt7603u_probe(struct usb_interface *intf, const struct usb_device_id 
     }
 
     // Step 3: Call Rust to get MAC init sequence
-    ret = mt7603_rust_get_mac_init_sequence(ops, 32, &count);
+    ret = mt7603_rust_get_mac_init_sequence(ops, ARRAY_SIZE(ops), &count);
     if (ret < 0) {
         dev_err(&intf->dev, "Failed to get MAC init sequence from Rust logic: %d\n", ret);
         return ret;

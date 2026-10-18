@@ -59,13 +59,28 @@ MT7603U 寄存器通过 USB vendor request 访问。`regops` 必须先经 `mt_ph
     - 发送 AddressLenReq 前：轮询 `RomReady==1 && RamRunning==0`。
     - 发送 FwStartReq 后：轮询 `RamRunning==1`。
 
-### 3.2 HIF/SCH Block (`0x4000`)
-- **`SCH_REG4` (`0x4594`)**: 调度器控制寄存器（固件下载时切换 bypass 模式）。
+### 3.2 HIF/SCH & PSE Scheduler Block (`0x4000` / `0x8000`)
+- **`SCH_REG4` (`0x4594`)**: 调度器控制寄存器（固件下载时切换 bypass 模式，正常运行时置 `0x0000_0040` Hybrid/LMAC 模式）。
   - Bit [0:3] (`SCH_REG4_FORCE_QID`): 强制 QID 值。USB 固件下载时置 `8`。
   - Bit [5] (`SCH_REG4_BYPASS_MODE`): `1` = bypass 模式（固件下载），`0` = 正常模式。
+  - Bit [6] (`HYBRID_MODE`): `1` = 启用 DMA 调度器 Hybrid / TXTIME 门限使能（`cmm_asic_mt.c:6367`）。
   - Bit [8]: PSE 复位脉冲（恢复时先置 `1` 再清 `0`）。
   - `SCH_REG4_FORCE_QID_MASK = 0x0f`，`SCH_REG4_BYPASS_MODE_MASK = 0x20`。
 - **`MT_HIF_BASE` (`0x4000`)**: HIF 基地址。
+- **`MT_TXTIME_THD_0..15` (`0x4500..0x453C`)**: 各队列最大 TX 时间门限，MT7603E1/E2 初始化为 `0x000F_FFFF`（`cmm_asic_mt.c:6349-6365`）。
+- **`MT_PAGE_CNT_0..4, 7` (`0x4540..0x4550, 0x455C`)**: 数据 AC0..AC4 与 Beacon 预留页数，`MAX_DATA_SIZE(1792) / 128 = 0x0E` (14 页)。
+- **`MT_PAGE_CNT_5` (`0x4554`)**: MCU 命令队列 Q5 预留页数，`MAX_MCUCMD_SIZE(4096) / 128 = 0x20` (32 页)。
+- **`MT_PAGE_CNT_8` (`0x4560`)**: 组播/广播队列 Q8 预留页数，`(1536 / 128) * 3 + 14 = 0x32` (50 页)。
+- **`MT_QUEUE_PRIORITY_1` (`0x4580`) / `MT_QUEUE_PRIORITY_2` (`0x4584`)**: 队列调度优先级，分别为 `0x2B1A_096E` / `0x785F_4D3C`（`cmm_asic_mt.c:6267-6270`）。
+- **`MT_SCH_REG_1` (`0x4588`)**: 页面大小配置与 FFA 阈值，`(2 << 28) | page_cnt`（实测 `FC_P0` `0x8120` = `0x0288_0288` → `page_cnt = 0x288`，故值为 `0x2000_0288`）。
+- **`MT_SCH_REG_2` (`0x458C`)**: 单包最大页数门限，`0x0000_000E` (14 页)（若未初始化为 0，WMM 数据端点 `EP 0x04..0x07` 将因 `pkt_pages > 0` 被 HIF DMA 调度器永久挂起）。
+- **`MT_GROUP_THD_0..2` (`0x4598..0x45A0`)**: Group 0/1/2 页配额，分别为 `0x288 - 0x0E - 0x20 = 0x025A`、`0x000E`、`0x0020`。
+- **`MT_BMAP_0` (`0x45B0`) / `MT_BMAP_1` (`0x45B4`)**: Group 队列位图，MT7603E2 分别为 `0x0080_FF5F` / `0x0000_0020`（`cmm_asic_mt.c:6324-6326`）。
+- **`MT_HIGH_PRIORITY_1` (`0x45BC`) / `MT_HIGH_PRIORITY_2` (`0x45C0`)**: 高优先级队列配置，分别为 `0x5555_5555` / `0x7855_5555`。
+- **`MT_PRIORITY_MASK` (`0x45C4`)**: 优先级掩码，`0xFFFF_FFFF`。
+- **`MT_RSV_MAX_THD` (`0x45C8`)**: FFA1 最大阈值，`0x0000_0288` (`page_cnt`)。
+- **`FC_P0` (`0x8120`, global `0xA000_0120`)**: PSE Port 0 (HIF) 流控配额寄存器，Bits [27:16] 为 `MAX_QUOTA_P0`（硬件实测 `0x0288`）。
+- **`FC_FRP` (`0x8138`, global `0xA000_0138`)**: PSE 空闲页回收优先级寄存器，值为 `0x0000_4037`（`cmm_asic_mt.c:6230-6231`）。
 
 ### 3.3 TMAC Block (`0x0002_1600`)
 - **`TMAC_TCR` (`0x0002_1600`)**: Transmit Control Register.

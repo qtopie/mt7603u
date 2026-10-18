@@ -16,12 +16,22 @@
 
 ### Feature: MAC Initialization Sequence Generation
 
-#### Scenario 1: [SPEC-MAC-001] Complete MAC CR Init Sequence Generation
+#### Scenario 1: [SPEC-MAC-001] Complete MAC CR & HIF DMA Scheduler Init Sequence Generation
 - **Given** 一个足够大的 `ops_buf` 数组（容量 >= 128）
 - **When** 调用 `mt7603_rust_get_mac_init_sequence(ops_buf, 128, out_count)`
 - **Then** 函数返回 `0`
 - **And** `out_count` 大于 0
 - **And** 序列中包含对 `AGG_AWSCR` (`0x0002_1248`) 和 `RMAC_RMACDR` (`0x0002_1878`) 的初始化写入指令
+- **And** 序列中包含厂商 `AsicDMASchedulerInit(DMA_SCH_LMAC)` (`hw_ctrl/cmm_asic_mt.c:6200-6372`) 的完整 HIF/PSE DMA 调度器初始化寄存器序列（基于 MT7603E2 实测 `FC_P0 = 0x0288_0288` → `page_cnt = 0x288`, `page_size = 128`）：
+  - `FC_FRP (0x8138) = 0x0000_4037`
+  - `MT_HIGH_PRIORITY_1 (0x45BC) = 0x5555_5555`, `MT_HIGH_PRIORITY_2 (0x45C0) = 0x7855_5555`
+  - `MT_QUEUE_PRIORITY_1 (0x4580) = 0x2B1A_096E`, `MT_QUEUE_PRIORITY_2 (0x4584) = 0x785F_4D3C`, `MT_PRIORITY_MASK (0x45C4) = 0xFFFF_FFFF`
+  - `MT_SCH_REG_1 (0x4588) = 0x2000_0288`, `MT_SCH_REG_2 (0x458C) = 0x0000_000E`
+  - `MT_PAGE_CNT_0..4 (0x4540..0x4550) = 0x0E`, `MT_PAGE_CNT_5 (0x4554) = 0x20`, `MT_PAGE_CNT_7 (0x455C) = 0x0E`, `MT_PAGE_CNT_8 (0x4560) = 0x32`
+  - `MT_RSV_MAX_THD (0x45C8) = 0x0288`, `MT_GROUP_THD_0 (0x4598) = 0x025A`, `MT_GROUP_THD_1 (0x459C) = 0x000E`, `MT_GROUP_THD_2 (0x45A0) = 0x0020`
+  - `MT_BMAP_0 (0x45B0) = 0x0080_FF5F`, `MT_BMAP_1 (0x45B4) = 0x0000_0020`
+  - `MT_TXTIME_THD_0..15 (0x4500..0x453C) = 0x000F_FFFF`, `SCH_REG4 (0x4594) = 0x0000_0040`
+- **Rationale:** 固件加载完成后仅清除 `SCH_REG4` 的 `BYPASS_MODE` 位会使 HIF DMA 调度器进入正常预测模式，但芯片复位后 `MT_SCH_REG_1/2`、`MT_GROUP_THD_0`、`MT_BMAP_0`、`MT_PAGE_CNT_*` 全为 `0`（实机 `SCH-DIAG` 读回确认：`SCH1=0, SCH2=0, G0=0, BMAP0=0, PCNT0..4=0`），导致走 WMM 数据端点 `EP 0x05` 的所有数据帧（如 EAPOL M2）因 `max_pkt_size=0` / 页配额为 0 被 HIF 调度器永久阻塞在 USB FIFO 中，无法进入 PSE/LMAC（而 `EP 0x08` 走 In-band Command 通路不受影响）。
 - **Mapped Test:** `src/rust/src/mac.rs:test_mac_init_sequence`
 
 #### Scenario 2: [SPEC-MAC-002] Buffer Overflow Protection
