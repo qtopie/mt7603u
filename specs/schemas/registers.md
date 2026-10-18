@@ -125,6 +125,17 @@ MT7603U 寄存器通过 USB vendor request 访问。`regops` 必须先经 `mt_ph
   - Bit [19]: `TxBulkEn`
 - **`USB_CYC_CFG` (`0x0002_4004`)**: USB Cycle Config Register.
 
+### 3.8 ARB & LPON Block (AP BssSync & Beacon Control, `0x0002_1400` / `0x0002_4000`)
+- **`ARB_SCR` (`0x0002_1480`)**: ARB System Control Register (`include/mac/mac_mt/wf_arb.h:93-100`).
+  - Bits [1:0] (`BCNQ_OP_MODE`): `0x0` = STA, `0x1` = AP (`BCNQ_OP_MODE_AP`), `0x2` = Ad-Hoc.
+  - Bits [31:30]: Clear in AP mode so BCN/BMC contend properly (`cmm_asic_mt.c:1295-1297`).
+- **`ARB_BCNQCR0` (`0x0002_1518`)**: Beacon Queue Control Register 0 (`BIT(0) = 1` starts BCN0 queue).
+- **`ARB_BCNQCR1` (`0x0002_151C`)**: Beacon Queue Flush Register (`BIT(0) = 1` flushes BCN0 queue).
+- **`LPON_T0CR` (`0x0002_4010`)**: TSF Timer 0 Control Register (`0x0000_000C` = Free-running HW TSF timer mode).
+- **`LPON_PISR` (`0x0002_4030`)**: Pre-TBTT Interval Setting Register (`0x0000_0050` for BSS0, unit 64us, `cmm_asic_mt.c:1278`).
+- **`LPON_T0TPCR` (`0x0002_4034`)**: TBTT 0 Timer Period Control Register (`(beacon_period & 0xFFFF) | BIT(31)` where `BIT(31) = TBTTn_CAL_EN`, `cmm_asic_mt.c:1258-1260`).
+- **`LPON_MPTCR0` (`0x0002_405C`)**: Main Periodic Timer Control Register 0 (`0x0000_0099` enables `TBTT0PERIODTIMER_EN | TBTT0TIMEUP_EN | PRETBTT0TIMEUP_EN | PRETBTT0INT_EN`, `cmm_asic_mt.c:1265`).
+
 ## 4. Vendor Request Command Codes (EP0)
 
 USB Vendor Requests 用于通过 Control Transfer 读写寄存器。**地址必须先用 `mt_physical_addr_map` 映射为全局物理地址**，再编码进 request：

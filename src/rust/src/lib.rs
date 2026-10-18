@@ -513,6 +513,32 @@ pub unsafe extern "C" fn mt7603_rust_parse_assoc_req(
     }
 }
 
+/// Builds the register write sequence to enable or disable AP BssSync & Beacon Queue.
+///
+/// # Safety
+/// Caller must ensure `ops_buf` points to writeable memory of at least `max_ops` elements,
+/// and `out_count` points to a valid `usize`.
+#[no_mangle]
+pub unsafe extern "C" fn mt7603_rust_build_ap_bss_sync_sequence(
+    beacon_period: u16,
+    enable: bool,
+    ops_buf: *mut RegWriteOp,
+    max_ops: usize,
+    out_count: *mut usize,
+) -> i32 {
+    if ops_buf.is_null() || out_count.is_null() {
+        return -22; // -EINVAL
+    }
+    let slice = core::slice::from_raw_parts_mut(ops_buf, max_ops);
+    match ap::build_ap_bss_sync_sequence(beacon_period, enable, slice) {
+        Ok(count) => {
+            *out_count = count;
+            0
+        }
+        Err(err) => err,
+    }
+}
+
 /// Constructs a channel switch MCU command frame (cid=0xED, ext_cid=0x08).
 ///
 /// # Safety

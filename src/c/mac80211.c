@@ -3,6 +3,8 @@
 #include <linux/slab.h>
 #include <linux/unaligned.h>
 #include <linux/etherdevice.h>
+#include <linux/workqueue.h>
+#include <linux/ktime.h>
 #include <net/cfg80211.h>
 #include <net/mac80211.h>
 #include "mt7603u_rust.h"
@@ -38,6 +40,10 @@ struct mt7603_rx_urb {
 struct mt7603u_dev {
     struct usb_device *udev;
     struct ieee80211_hw *hw;
+    struct ieee80211_vif *ap_vif;
+    struct delayed_work beacon_work;
+    u16 beacon_int;
+    bool beacon_enabled;
     u8 mac_addr[ETH_ALEN];
     u8 current_channel;
     u8 cmd_seq;
@@ -50,6 +56,29 @@ struct mt7603u_dev {
     void *cmd_buf;
     struct usb_anchor tx_anchor;
 };
+
+static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_control *control, struct sk_buff *skb);
+
+static void mt7603_beacon_work(struct work_struct *work)
+{
+    struct mt7603u_dev *dev = container_of(work, struct mt7603u_dev, beacon_work.work);
+    struct sk_buff *skb;
+    u16 bint;
+
+    if (!dev->running || !dev->beacon_enabled || !dev->ap_vif)
+        return;
+
+    skb = ieee80211_beacon_get(dev->hw, dev->ap_vif, 0);
+    if (skb) {
+        if (skb->len >= 32) {
+            put_unaligned_le64(ktime_to_us(ktime_get_boottime()), skb->data + 24);
+        }
+        mt7603_mac80211_tx(dev->hw, NULL, skb);
+    }
+
+    bint = dev->beacon_int ? dev->beacon_int : 100;
+    schedule_delayed_work(&dev->beacon_work, msecs_to_jiffies((bint * 1024) / 1000));
+}
 
 static void mt7603_cmd_rsp_complete(struct urb *urb)
 {
@@ -464,6 +493,8 @@ static void mt7603_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
 
     pr_info("mt7603u: mac80211 stop requested (suspend=%d)\n", suspend);
     dev->running = false;
+    dev->beacon_enabled = false;
+    cancel_delayed_work_sync(&dev->beacon_work);
     mt7603_stop_rx(dev);
     usb_kill_anchored_urbs(&dev->tx_anchor);
 
@@ -491,13 +522,28 @@ static int mt7603_mac80211_add_interface(struct ieee80211_hw *hw, struct ieee802
             mt7603_execute_reg_ops(dev->udev, ops, written);
             pr_info("mt7603u: Own MAC updated for vif (%pM)\n", vif->addr);
         }
+        if (vif->type == NL80211_IFTYPE_AP) {
+            u32 lo = (u32)vif->addr[0] | ((u32)vif->addr[1] << 8) |
+                     ((u32)vif->addr[2] << 16) | ((u32)vif->addr[3] << 24);
+            u32 hi = (u32)vif->addr[4] | ((u32)vif->addr[5] << 8) | BIT(16);
+            dev->ap_vif = vif;
+            mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
+            mt7603_usb_write_reg(dev->udev, 0x00021808, hi);
+            pr_info("mt7603u: AP Current BSSID programmed (%pM)\n", vif->addr);
+        }
     }
     return 0;
 }
 
 static void mt7603_mac80211_remove_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 {
+    struct mt7603u_dev *dev = hw->priv;
     pr_info("mt7603u: remove_interface requested (type=%d)\n", vif->type);
+    if (vif == dev->ap_vif) {
+        dev->beacon_enabled = false;
+        cancel_delayed_work_sync(&dev->beacon_work);
+        dev->ap_vif = NULL;
+    }
 }
 
 static int mt7603_mac80211_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
@@ -542,8 +588,53 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
     pr_info("mt7603u: bss_info_changed: changed=0x%llx bssid=%pM assoc=%d\n",
             changed, bssid, vif ? vif->cfg.assoc : -1);
 
-    if (changed & BSS_CHANGED_BEACON) {
-        pr_info("mt7603u: AP beacon state changed (enabled=%d)\n", info ? info->enable_beacon : 0);
+    if (info && info->chanreq.oper.chan) {
+        u8 ch = info->chanreq.oper.chan->hw_value;
+        if (ch != dev->current_channel) {
+            pr_info("mt7603u: bss_info_changed: tuning to chanreq channel %d (%d MHz)\n",
+                    ch, info->chanreq.oper.chan->center_freq);
+            mt7603_set_channel(dev, ch);
+        }
+    }
+
+    if (changed & (BSS_CHANGED_BEACON | BSS_CHANGED_BEACON_ENABLED | BSS_CHANGED_BEACON_INT)) {
+        pr_info("mt7603u: AP beacon state changed (enabled=%d int=%u)\n",
+                info ? info->enable_beacon : 0, info ? info->beacon_int : 0);
+        if (vif && vif->type == NL80211_IFTYPE_AP && !is_zero_ether_addr(vif->addr)) {
+            u32 lo = (u32)vif->addr[0] | ((u32)vif->addr[1] << 8) |
+                     ((u32)vif->addr[2] << 16) | ((u32)vif->addr[3] << 24);
+            u32 hi = (u32)vif->addr[4] | ((u32)vif->addr[5] << 8) | BIT(16);
+            u32 rmacdr = 0;
+
+            dev->ap_vif = vif;
+            if (mt7603_rust_build_own_mac_sequence(vif->addr, ops, 32, &written) == 0 && written > 0)
+                mt7603_execute_reg_ops(dev->udev, ops, written);
+            mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
+            mt7603_usb_write_reg(dev->udev, 0x00021808, hi);
+            if (mt7603_usb_read_reg(dev->udev, 0x00021878, &rmacdr) == 0) {
+                rmacdr &= ~(0x3 << 24);
+                mt7603_usb_write_reg(dev->udev, 0x00021878, rmacdr);
+            }
+        }
+
+        if (info && info->enable_beacon) {
+            dev->beacon_int = info->beacon_int ? info->beacon_int : 100;
+            dev->beacon_enabled = true;
+            if (mt7603_rust_build_ap_bss_sync_sequence(dev->beacon_int, true, ops, ARRAY_SIZE(ops), &written) == 0 &&
+                written > 0) {
+                mt7603_execute_reg_ops(dev->udev, ops, written);
+                pr_info("mt7603u: AP BssSync enabled (beacon_int=%u, %zu ops)\n", dev->beacon_int, written);
+            }
+            schedule_delayed_work(&dev->beacon_work, 0);
+        } else if (changed & BSS_CHANGED_BEACON_ENABLED) {
+            dev->beacon_enabled = false;
+            cancel_delayed_work_sync(&dev->beacon_work);
+            if (mt7603_rust_build_ap_bss_sync_sequence(0, false, ops, ARRAY_SIZE(ops), &written) == 0 &&
+                written > 0) {
+                mt7603_execute_reg_ops(dev->udev, ops, written);
+                pr_info("mt7603u: AP BssSync disabled (%zu ops)\n", written);
+            }
+        }
     }
     if (changed & (BSS_CHANGED_BSSID | BSS_CHANGED_ASSOC)) {
         pr_info("mt7603u: BSSID/ASSOC changed to %pM (assoc=%d)\n", bssid, vif ? vif->cfg.assoc : -1);
@@ -593,15 +684,17 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
                 pr_info("mt7603u: RMAC_RMACDR configured for Single BSSID mode (0x%08x)\n", rmacdr);
             }
 
-            ret = mt7603_rust_build_wtbl_sta_sequence(bssid, ops, 32, &written);
-            if (ret == 0 && written > 0) {
-                mt7603_execute_reg_ops(dev->udev, ops, written);
-                /* Clear WTBL2 DW15 (BA info) for WCID 1 (0x00040000 + 1*64 + 15*4)
-                 * per vendor AsicUpdateRxWCIDTable (hw_ctrl/cmm_asic_mt.c:3047). */
-                mt7603_usb_write_reg(dev->udev, 0x0004007C, 0);
-                pr_info("mt7603u: WTBL1 STA sequence applied for %pM (%zu ops)\n", bssid, written);
+            if (!vif || vif->type != NL80211_IFTYPE_AP) {
+                ret = mt7603_rust_build_wtbl_sta_sequence(bssid, ops, 32, &written);
+                if (ret == 0 && written > 0) {
+                    mt7603_execute_reg_ops(dev->udev, ops, written);
+                    /* Clear WTBL2 DW15 (BA info) for WCID 1 (0x00040000 + 1*64 + 15*4)
+                     * per vendor AsicUpdateRxWCIDTable (hw_ctrl/cmm_asic_mt.c:3047). */
+                    mt7603_usb_write_reg(dev->udev, 0x0004007C, 0);
+                    pr_info("mt7603u: WTBL1 STA sequence applied for %pM (%zu ops)\n", bssid, written);
+                }
             }
-        } else {
+        } else if (!vif || vif->type != NL80211_IFTYPE_AP) {
             mt7603_usb_write_reg(dev->udev, 0x00021804, 0);
             mt7603_usb_write_reg(dev->udev, 0x00021808, 0);
             mt7603_usb_write_reg(dev->udev, 0x00028020, 0);
@@ -617,11 +710,56 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
 static void mt7603_tx_complete(struct urb *urb)
 {
     struct sk_buff *skb = urb->context;
+    struct ieee80211_tx_info *info;
+    struct mt7603u_dev *dev;
+    u32 meta;
+    u16 orig_len;
+    u8 hdr_len, hdr_pad_len;
+    u16 fc = 0;
+
+    if (!skb) {
+        usb_free_urb(urb);
+        return;
+    }
+
     if (urb->status != 0) {
         pr_info_ratelimited("mt7603u: TX URB failed: status=%d actual=%d len=%d\n",
-                            urb->status, urb->actual_length, skb ? skb->len : -1);
+                            urb->status, urb->actual_length, skb->len);
     }
-    dev_kfree_skb_any(skb);
+
+    info = IEEE80211_SKB_CB(skb);
+    dev = info->rate_driver_data[0];
+    meta = (u32)(uintptr_t)info->rate_driver_data[1];
+    orig_len = meta & 0xffff;
+    hdr_len = (meta >> 16) & 0xff;
+    hdr_pad_len = (meta >> 24) & 0xff;
+
+    if (skb->len >= 32)
+        skb_pull(skb, 32);
+
+    if (hdr_pad_len > 0 && skb->len >= (u32)hdr_len + hdr_pad_len) {
+        memmove(skb->data + hdr_len,
+                skb->data + hdr_len + hdr_pad_len,
+                skb->len - hdr_len - hdr_pad_len);
+    }
+
+    if (orig_len > 0 && skb->len > orig_len)
+        skb_trim(skb, orig_len);
+
+    if (skb->len >= 2)
+        fc = get_unaligned_le16(skb->data);
+
+    /* Internal Beacon skbs from ieee80211_beacon_get are freed directly;
+     * all other mac80211 / hostapd frames report TX status (IEEE80211_TX_STAT_ACK)
+     * so hostapd receives NL80211_CMD_FRAME_TX_STATUS and proceeds to 4-way handshake. */
+    if (dev && dev->running && !ieee80211_is_beacon(cpu_to_le16(fc))) {
+        ieee80211_tx_info_clear_status(info);
+        if (urb->status == 0 && !(info->flags & IEEE80211_TX_CTL_NO_ACK))
+            info->flags |= IEEE80211_TX_STAT_ACK;
+        ieee80211_tx_status_irqsafe(dev->hw, skb);
+    } else {
+        dev_kfree_skb_any(skb);
+    }
     usb_free_urb(urb);
 }
 
@@ -769,6 +907,14 @@ static void mt7603_mac80211_tx(struct ieee80211_hw *hw, struct ieee80211_tx_cont
     }
     memset(skb_put(skb, pad_len), 0, pad_len);
 
+    {
+        struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+        info->rate_driver_data[0] = dev;
+        info->rate_driver_data[1] = (void *)(uintptr_t)((u32)params.pkt_len |
+                                                        ((u32)params.hdr_len << 16) |
+                                                        ((u32)hdr_pad_len << 24));
+    }
+
     struct urb *urb = usb_alloc_urb(0, GFP_ATOMIC);
     if (!urb) {
         dev_kfree_skb_any(skb);
@@ -802,7 +948,7 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
 
     pr_info("mt7603u: sta_add: addr=%pM aid=%d vif_type=%d\n", sta->addr, sta->aid, vif ? vif->type : -1);
 
-    if (sta && !is_zero_ether_addr(sta->addr)) {
+    if ((!vif || vif->type != NL80211_IFTYPE_AP) && sta && !is_zero_ether_addr(sta->addr)) {
         struct cfg80211_bss *bss_entry = cfg80211_get_bss(hw->wiphy, NULL, sta->addr, NULL, 0,
                                                            IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
         if (bss_entry) {
@@ -823,11 +969,13 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
     }
 
     if (sta && !is_zero_ether_addr(sta->addr)) {
-        u32 lo = (u32)sta->addr[0] | ((u32)sta->addr[1] << 8) |
-                 ((u32)sta->addr[2] << 16) | ((u32)sta->addr[3] << 24);
-        u32 hi = (u32)sta->addr[4] | ((u32)sta->addr[5] << 8) | BIT(16);
-        mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
-        mt7603_usb_write_reg(dev->udev, 0x00021808, hi);
+        if (!vif || vif->type != NL80211_IFTYPE_AP) {
+            u32 lo = (u32)sta->addr[0] | ((u32)sta->addr[1] << 8) |
+                     ((u32)sta->addr[2] << 16) | ((u32)sta->addr[3] << 24);
+            u32 hi = (u32)sta->addr[4] | ((u32)sta->addr[5] << 8) | BIT(16);
+            mt7603_usb_write_reg(dev->udev, 0x00021804, lo);
+            mt7603_usb_write_reg(dev->udev, 0x00021808, hi);
+        }
 
         ret = mt7603_rust_build_wtbl_sta_sequence(sta->addr, ops, 32, &written);
         if (ret == 0 && written > 0) {
@@ -842,9 +990,11 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
 static int mt7603_mac80211_sta_remove(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_sta *sta)
 {
     struct mt7603u_dev *dev = hw->priv;
-    pr_info("mt7603u: sta_remove: addr=%pM\n", sta ? sta->addr : NULL);
-    mt7603_usb_write_reg(dev->udev, 0x00021804, 0);
-    mt7603_usb_write_reg(dev->udev, 0x00021808, 0);
+    pr_info("mt7603u: sta_remove: addr=%pM vif_type=%d\n", sta ? sta->addr : NULL, vif ? vif->type : -1);
+    if (!vif || vif->type != NL80211_IFTYPE_AP) {
+        mt7603_usb_write_reg(dev->udev, 0x00021804, 0);
+        mt7603_usb_write_reg(dev->udev, 0x00021808, 0);
+    }
     mt7603_usb_write_reg(dev->udev, 0x00028020, 0);
     mt7603_usb_write_reg(dev->udev, 0x00028024, 0);
     mt7603_usb_write_reg(dev->udev, 0x00028028, 0);
@@ -861,15 +1011,33 @@ static int mt7603_mac80211_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd
 {
     struct mt7603u_dev *dev = hw->priv;
     int wcid;
-    u32 wtbl1_base, key_base, dw;
+    u32 wtbl1_base, wtbl2_base, key_base, dw;
     int i, ret = 0;
 
     pr_info("mt7603u: set_key requested (cmd=%d, cipher=0x%x, key_idx=%d, flags=0x%x, len=%d)\n",
             cmd, key->cipher, key->keyidx, key->flags, key->keylen);
 
+    /* Pairwise key (PTK) -> WCID 1. Group key (GTK) -> broadcast WCID 0. */
+    if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE)
+        wcid = 1;
+    else if (sta && !is_zero_ether_addr(sta->addr))
+        wcid = 1;
+    else
+        wcid = 0;
+
+    wtbl1_base = WTBL1_BASE + (u32)wcid * WTBL1_ENTRY_SIZE;
+
     if (cmd != SET_KEY) {
-        /* Key removal: leave the entry; a follow-up SET_KEY re-programs it.
-         * TODO: clear adm/cipher_suit/key bytes for a clean removal. */
+        /* Key removal: clear rkv/kid in DW0 and cipher_suit in DW2 so plaintext
+         * EAPOL frames on a subsequent re-association are not dropped. */
+        if (mt7603_usb_read_reg(dev->udev, wtbl1_base, &dw) == 0) {
+            dw &= ~((1u << 26) | (0x3u << 23));
+            mt7603_usb_write_reg(dev->udev, wtbl1_base, dw);
+        }
+        if (mt7603_usb_read_reg(dev->udev, wtbl1_base + 0x08, &dw) == 0) {
+            dw &= ~0x78u;
+            mt7603_usb_write_reg(dev->udev, wtbl1_base + 0x08, dw);
+        }
         return 0;
     }
 
@@ -881,15 +1049,6 @@ static int mt7603_mac80211_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd
                 key->cipher);
         return -EOPNOTSUPP;
     }
-
-    /* Pairwise key (PTK) is shared with the AP -> WCID 1 (the AP entry used
-     * for both TX to and RX from the AP). Group key (GTK) -> broadcast WCID 0. */
-    if (key->flags & IEEE80211_KEY_FLAG_PAIRWISE)
-        wcid = 1;
-    else if (sta && !is_zero_ether_addr(sta->addr))
-        wcid = 1;
-    else
-        wcid = 0;
 
     /* Write the 16-byte TK into the WTBL3 key SRAM (host remap window).
      * Vendor CmdProcAddRemoveKey (cmm_asic_mt.c:3471) writes the CCMP TK as
@@ -903,15 +1062,25 @@ static int mt7603_mac80211_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd
         mt7603_usb_write_reg(dev->udev, key_base + i * 4, w);
     }
 
+    /* Reset WTBL2 DW0/DW1 TX CCMP Packet Number (PN) to 1 for the new key. */
+    wtbl2_base = 0x00040000 + (u32)wcid * 64;
+    mt7603_usb_write_reg(dev->udev, wtbl2_base, 1);
+    mt7603_usb_write_reg(dev->udev, wtbl2_base + 4, 0);
+
     /* WTBL1 DW0: mark RX valid (rv), RX key valid (rkv), key index (kid),
-     * and the rate/BA control bits the vendor sets for a keyed entry. */
-    wtbl1_base = WTBL1_BASE + (u32)wcid * WTBL1_ENTRY_SIZE;
+     * and the rate/BA control bits the vendor sets for a keyed entry.
+     * In AP mode, WCID 0 (group key) is TX-only (rv=1, rkv=0 per vendor
+     * CmdProcAddRemoveKey cmm_asic_mt.c:3511-3513). */
     if (mt7603_usb_read_reg(dev->udev, wtbl1_base, &dw) == 0) {
+        dw &= ~(0x3u << 23); /* clear kid[24:23] */
         dw |= (1u << 28) /* rv */
-            | (1u << 26)  /* rkv */
-            | (1u << 22)  /* rc_a1 */
-            | (1u << 25)  /* rc_id */
+            | (1u << 22) /* rc_a1 */
+            | (1u << 25) /* rc_id */
             | ((u32)(key->keyidx & 0x3) << 23); /* kid */
+        if (wcid != 0 || !vif || vif->type != NL80211_IFTYPE_AP)
+            dw |= (1u << 26); /* rkv */
+        else
+            dw &= ~(1u << 26);
         mt7603_usb_write_reg(dev->udev, wtbl1_base, dw);
     }
 
@@ -1094,6 +1263,7 @@ int mt7603_register_mac80211(struct usb_interface *intf, struct ieee80211_hw **o
             dev->eeprom[0x46], dev->eeprom[0x47]);
 
     init_usb_anchor(&dev->tx_anchor);
+    INIT_DELAYED_WORK(&dev->beacon_work, mt7603_beacon_work);
 
     SET_IEEE80211_DEV(hw, &intf->dev);
     hw->queues = 4;
@@ -1128,6 +1298,8 @@ void mt7603_unregister_mac80211(struct ieee80211_hw *hw)
     if (!hw) return;
     dev = hw->priv;
     dev->running = false;
+    dev->beacon_enabled = false;
+    cancel_delayed_work_sync(&dev->beacon_work);
     mt7603_stop_rx(dev);
     usb_kill_anchored_urbs(&dev->tx_anchor);
     ieee80211_unregister_hw(hw);

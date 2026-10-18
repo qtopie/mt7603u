@@ -45,6 +45,7 @@ rust_build:
 		-u mt7603_rust_build_beacon \
 		-u mt7603_rust_build_assoc_resp \
 		-u mt7603_rust_parse_assoc_req \
+		-u mt7603_rust_build_ap_bss_sync_sequence \
 		-u mt7603_rust_build_chan_switch_cmd \
 		-u mt7603_rust_build_tx_power_ctrl_cmd \
 		-u mt7603_rust_build_ch_privilege_cmd \

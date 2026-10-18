@@ -76,6 +76,7 @@ extern int mt7603_rust_parse_beacon(const uint8_t *frame_buf, size_t frame_len, 
 extern int mt7603_rust_build_beacon(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid, uint8_t channel, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_assoc_resp(const uint8_t *sta_mac, const uint8_t *bssid, uint16_t aid, uint16_t status_code, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_parse_assoc_req(const uint8_t *frame_buf, size_t frame_len, uint8_t *out_sta_mac, uint16_t *out_cap, uint16_t *out_listen);
+extern int mt7603_rust_build_ap_bss_sync_sequence(uint16_t beacon_period, bool enable, struct reg_write_op *ops_buf, size_t max_ops, size_t *out_count);
 extern int mt7603_rust_build_chan_switch_cmd(uint8_t ctrl_ch, uint8_t central_ch, uint8_t bw, uint8_t tx_streams, uint8_t rx_streams, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_tx_power_ctrl_cmd(const uint8_t *eeprom, size_t eeprom_len, uint8_t central_ch, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
 extern int mt7603_rust_build_ch_privilege_cmd(uint8_t channel, uint8_t seq, uint8_t *out_buf, size_t max_out_len, size_t *out_written);
