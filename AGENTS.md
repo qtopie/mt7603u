@@ -43,3 +43,26 @@ Linux 驱动设计理论与 MT76 系列拆解笔记，用于理解架构与术�
 ### 6.2 硬件与协议规范 (SSOT)
 - **`specs/` 目录**：包含所有 MT7603U 寄存器映射表（`specs/schemas/registers.md`）、MCU 命令格式（`specs/modules/mcu.spec.md`）、802.11 状态机与收发契约（`specs/modules/`）。
 - 硬件 I/O 在 `harness/mocks/` 中 Mock（如 `RegOps` / `UsbBus` trait），所有硬件访问序列严格依据 `specs/`。
+
+## 7. Project Layout (工程目录结构)
+
+```
+├── .agents/          # Agent dynamic boards, tasks, and configurations
+├── AGENTS.md         # System operating guidelines & safety rules
+├── Makefile          # Kbuild + Cargo hybrid build system
+├── docs/             # Technical designs, RFCs, and bug RCA reports
+│   ├── bugs/         # Root Cause Analysis (RCA) records
+│   └── rfcs/         # Architectural RFC proposals
+├── harness/          # Test harness, hardware mocks, and test fixtures
+│   ├── fixtures/     # Reference firmware binaries and dumps
+│   ├── mocks/        # Mock implementations for RegOps and USB
+│   └── runners/      # BDD scenario runners
+├── scripts/          # Automation toolchain (check, build, test)
+├── specs/            # Single Source of Truth (SSOT) behavioral specifications
+│   ├── modules/      # Module specifications (MCU, STA, AP, RX/TX, EEPROM)
+│   └── schemas/      # Register maps and FFI type definitions
+└── src/
+    ├── c/            # C kernel module skeleton (USB, mac80211, RegOps)
+    └── rust/         # Rust no_std core logic engine (crates / modules)
+```
+

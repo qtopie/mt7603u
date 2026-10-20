@@ -1,18 +1,40 @@
 # MT7603U Linux WiFi Driver (C + Rust / mac80211)
 
-A modern, memory-safe Linux kernel driver for MediaTek **MT7603U** 802.11b/g/n USB wireless network adapters.
+A modern, high-performance, and memory-safe Linux kernel driver for MediaTek **MT7603U** 802.11b/g/n 2T2R USB wireless network adapters.
 
 Built with a hybrid architecture combining a lean C kernel-module skeleton with a pure `no_std` Rust logic engine, integrated directly into the standard Linux **`mac80211`** wireless networking subsystem.
 
 ---
 
-## 🌟 Key Highlights
+## 🌟 Key Features
 
-- **`mac80211` Subsystem Integration**: Seamless integration with standard Linux wireless tools (`iw`, `wpa_supplicant`, `hostapd`, `NetworkManager`).
-- **Memory-Safe Core**: Frame parsing, EEPROM/eFuse decoding, MCU command generation, and register sequence transitions implemented in 100% `no_std` Rust.
-- **Robust Firmware Lifecycle**: Andes N9 MCU firmware uploader with ROM ready polling, dynamic sequence IDs, and warm restart-dl support.
-- **Spec-First Engineering**: Every hardware interaction and protocol state machine is strictly governed by behavioral contracts in [`specs/`](specs/) and verified via automated test harnesses.
-- **Multi-Mode Support**: Supports Station (STA), Access Point (AP), and Monitor modes.
+### 🚀 802.11n 2x2 MIMO High Throughput (Up to 300 Mbps)
+- **Dual Spatial Streams (2T2R)**: Supports 2-Stream MIMO with MCS 0 through MCS 15.
+- **40 MHz High Throughput (HT40)**: Dynamic 20 MHz / 40 MHz channel bandwidth switching and center-frequency alignment.
+- **Short Guard Interval (Short GI)**: 400 ns Short GI support across both HT20 and HT40, enabling physical link rates up to 300 Mbps.
+- **A-MPDU Aggregation & BlockAck**: High-efficiency frame aggregation and hardware BlockAck session management (`BSCR0/1`, `WTBL2`).
+- **Rate Control Integration**: Seamless interoperation with the kernel's `Minstrel-HT` rate control algorithm and hardware transmission status feedback (`TXS`).
+
+### 📱 Station Mode (STA / Client)
+- **Active & Passive Scanning**: Complete 802.11b/g/n scanning across 2.4 GHz channels 1–13 with dynamic channel switching.
+- **WPA / WPA2-PSK Security**: Robust CCMP (AES) and TKIP cipher suites with hardware-accelerated encryption and decryption.
+- **Accurate RSSI Reporting**: Real-time signal strength computation calibrated against onboard eFuse/EEPROM gain offsets.
+- **Reliable Networking**: Clean 802.11 authentication and association state machine, zero-loss DHCPv4 lease negotiation, and low-latency TCP/UDP/ICMP traffic.
+
+### 📡 Access Point Mode (AP / SoftAP)
+- **Hostapd Integration**: Standard Linux Access Point operation via `NL80211_IFTYPE_AP` and `hostapd`.
+- **Hardware TBTT & Beacon Queue**: Hardware LPON TBTT timing synchronization (`LPON_T0CR`) combined with periodic Beacon generation.
+- **Client Lifecycle Management**: Station admission tracking, multi-client association, and PTK/GTK encryption key distribution.
+
+### 🔍 Monitor Mode & Raw Frame Injection
+- **Promiscuous Sniffing**: Raw over-the-air packet capture (`NL80211_IFTYPE_MONITOR`) with dynamic RMAC RFCR filter configuration.
+- **Radiotap Metadata Generation**: Comprehensive per-packet Radiotap headers with Group3 RXV1 PHY metadata (RxRate, Modulation, Channel, RSSI, Short GI).
+- **Packet Injection**: Raw 802.11 frame transmission through dedicated hardware beacon and management queues.
+
+### 🛡️ Memory-Safe Hybrid Design
+- **100% `no_std` Rust Engine**: Safe parsing and generation for 802.11 frames, EEPROM/eFuse maps, MCU command packets, and register sequences.
+- **Lean C Kernel Skeleton**: Robust USB device lifecycle handling, URB anchoring, DMA zero-copy rings, and clean, leak-free teardown.
+- **Reliable Firmware Management**: Andes N9 MCU firmware loader featuring ROM-ready polling and warm restart-dl recovery.
 
 ---
 
@@ -40,7 +62,7 @@ Built with a hybrid architecture combining a lean C kernel-module skeleton with 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-For in-depth architectural decisions, see [RFC-0001: Architecture](docs/rfcs/0001-architecture.md) and [System Design](docs/system-design.md).
+For detailed technical designs, see [RFC-0001: Architecture](docs/rfcs/0001-architecture.md) and [System Design](docs/system-design.md).
 
 ---
 
@@ -57,7 +79,7 @@ For in-depth architectural decisions, see [RFC-0001: Architecture](docs/rfcs/000
 
 ## 📱 Reference Test Device: 360 随身WiFi 3
 
-This driver is validated and tested on the **Qihoo 360 随身WiFi 3** ([Official Page](https://wifi.360.cn/easy)), an MT7603U-powered USB dongle with dual onboard PIFA antennas.
+This driver is tested and validated against the **Qihoo 360 随身WiFi 3** ([Official Page](https://wifi.360.cn/easy)), a popular MT7603U-powered USB dongle with dual onboard PIFA antennas.
 
 <p align="center">
   <img src="docs/assets/360_wifi_3.jpg" alt="360 随身WiFi 3" width="600" />
@@ -88,20 +110,20 @@ This driver is validated and tested on the **Qihoo 360 随身WiFi 3** ([Official
 
 ### Prerequisites
 
-Ensure you have the required build tools and Rust toolchain installed:
+Ensure you have the required build tools, kernel headers, and Rust toolchain installed:
 
 ```bash
 # Ubuntu / Debian
 sudo apt update
 sudo apt install -y build-essential linux-headers-$(uname -r) pkg-config libelf-dev
 
-# Rust toolchain (nightly or stable with no_std target)
+# Rust toolchain with no_std target
 rustup target add x86_64-unknown-none
 ```
 
 ### Firmware Setup
 
-Place the MT7603U firmware binary (`mt7603u_e2.bin`) in `/lib/firmware/mt7603u.bin`:
+Place the MT7603U firmware binary (`mt7603u_e2.bin`) into `/lib/firmware/mt7603u.bin`:
 
 ```bash
 sudo cp harness/fixtures/mt7603u_e2.bin /lib/firmware/mt7603u.bin
@@ -109,7 +131,7 @@ sudo cp harness/fixtures/mt7603u_e2.bin /lib/firmware/mt7603u.bin
 
 ### Building the Driver
 
-To compile both the Rust static library and the Linux kernel module:
+Compile both the Rust static library and the Linux kernel module:
 
 ```bash
 make
@@ -118,7 +140,7 @@ make
 ### Loading the Driver
 
 ```bash
-# Load mac80211 dependency if not already loaded
+# Load mac80211 subsystem dependency
 sudo modprobe mac80211
 
 # Insert mt7603u kernel module
@@ -131,84 +153,94 @@ Verify device initialization via `dmesg`:
 sudo dmesg | grep mt7603
 ```
 
-Check the network interface using `iw`:
+Check the recognized network interface using `iw`:
 
 ```bash
 iw dev
 ```
 
-### Desktop & NetworkManager Integration
+---
 
-To ensure the wireless adapter is managed by NetworkManager and visible in desktop environments (such as GNOME Network / Wi-Fi settings):
+## 💡 Usage Examples
+
+### 1. Connecting to Wi-Fi via NetworkManager (`nmcli`)
 
 ```bash
-# Verify device name (e.g. wlxb0d59d8c8c7a)
-nmcli device status
-
-# Enable NetworkManager management for the interface
-sudo nmcli device set <interface_name> managed yes
-
-# List nearby Wi-Fi access points
+# List nearby Wi-Fi networks
 nmcli device wifi list ifname <interface_name>
 
-# Connect to a Wi-Fi network
+# Connect to an access point with WPA2-PSK
 nmcli device wifi connect "<SSID>" password "<PASSWORD>" ifname <interface_name>
 ```
 
-> [!TIP]
-> When running standalone AP (`hostapd`) or monitor-mode tools (`tcpdump`, `aircrack-ng`), you can temporarily set `managed no` to prevent NetworkManager background scans from interrupting your sessions:
-> ```bash
-> sudo nmcli device set <interface_name> managed no
-> ```
+### 2. Creating a SoftAP Hotspot (`hostapd`)
+
+Create a minimal `hostapd.conf`:
+
+```ini
+interface=wlxb0d59d8c8c7a
+driver=nl80211
+ssid=MT7603U-AP
+hw_mode=g
+channel=6
+ieee80211n=1
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
+wpa=2
+wpa_passphrase=mysecretpassword
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+```
+
+Launch hostapd:
+
+```bash
+sudo hostapd hostapd.conf
+```
+
+### 3. Monitor Mode & Packet Capture
+
+```bash
+# Bring interface down
+sudo ip link set <interface_name> down
+
+# Switch to monitor mode
+sudo iw dev <interface_name> set type monitor
+
+# Bring interface up
+sudo ip link set <interface_name> up
+
+# Set channel (e.g. channel 6)
+sudo iw dev <interface_name> set channel 6
+
+# Capture packets with full Radiotap headers
+sudo tcpdump -i <interface_name> -y IEEE802_11_RADIO -s 0 -vvv
+```
 
 ---
 
 ## 🧪 Testing & Validation
 
-The codebase follows strict **Harness-Driven Development (HDD)**. You can run all unit tests, spec contracts, and linter checks without physical hardware:
+The codebase includes an extensive automated test suite covering unit tests, state machine transitions, and packet transcoding:
 
 ```bash
 # Run full automated validation suite
 ./scripts/check.sh
 
-# Run harness tests and BDD specs only
-./scripts/check-harness.sh
+# Run Rust unit tests only
+cargo test --manifest-path src/rust/Cargo.toml
 ```
 
-### Hardware Active Scan (Optional)
+### Hardware Verification (Optional)
 
 If a physical MT7603U adapter is connected:
 
 ```bash
+# Test hardware channel scanning & RSSI readout
 sudo ./scripts/test-hardware-scan.sh
-```
-
----
-
-## 📂 Project Layout
-
-```
-├── .agents/          # Agent dynamic boards, tasks, and configurations
-├── AGENTS.md         # System operating guidelines & safety rules
-├── Makefile          # Kbuild + Cargo hybrid build system
-├── docs/             # Technical designs, RFCs, and bug RCA reports
-│   ├── bugs/         # Root Cause Analysis (RCA) records
-│   └── rfcs/         # Architectural RFC proposals
-├── harness/          # Test harness, hardware mocks, and test fixtures
-│   ├── fixtures/     # Reference firmware binaries and dumps
-│   ├── mocks/        # Mock implementations for RegOps and USB
-│   └── runners/      # BDD scenario runners
-├── scripts/          # Automation toolchain (check, build, test)
-├── specs/            # Single Source of Truth (SSOT) behavioral specifications
-│   ├── modules/      # Module specifications (MCU, STA, AP, RX/TX, EEPROM)
-│   └── schemas/      # Register maps and FFI type definitions
-└── src/
-    ├── c/            # C kernel module skeleton (USB, mac80211, RegOps)
-    └── rust/         # Rust no_std core logic engine (crates / modules)
 ```
 
 ---
 
 ## 📜 License
 
-This project is licensed under the GPLv2 (compatible with Linux kernel driver guidelines).
+This project is licensed under the **GPLv2** (compatible with Linux kernel driver guidelines).
