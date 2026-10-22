@@ -1,7 +1,12 @@
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/slab.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 #include <linux/unaligned.h>
+#else
+#include <asm/unaligned.h>
+#endif
 #include <linux/etherdevice.h>
 #include <linux/workqueue.h>
 #include <linux/ktime.h>
@@ -71,7 +76,11 @@ static void mt7603_beacon_work(struct work_struct *work)
     if (!dev->running || !dev->beacon_enabled || !dev->ap_vif)
         return;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     skb = ieee80211_beacon_get(dev->hw, dev->ap_vif, 0);
+#else
+    skb = ieee80211_beacon_get(dev->hw, dev->ap_vif);
+#endif
     if (skb) {
         if (skb->len >= 32) {
             put_unaligned_le64(ktime_to_us(ktime_get_boottime()), skb->data + 24);
@@ -523,11 +532,19 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
     return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 static void mt7603_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
 {
     struct mt7603u_dev *dev = hw->priv;
 
     pr_info("mt7603u: mac80211 stop requested (suspend=%d)\n", suspend);
+#else
+static void mt7603_mac80211_stop(struct ieee80211_hw *hw)
+{
+    struct mt7603u_dev *dev = hw->priv;
+
+    pr_info("mt7603u: mac80211 stop requested\n");
+#endif
     dev->running = false;
     dev->beacon_enabled = false;
     cancel_delayed_work_sync(&dev->beacon_work);
@@ -602,7 +619,11 @@ static void mt7603_mac80211_remove_interface(struct ieee80211_hw *hw, struct iee
     }
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 static int mt7603_mac80211_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
+#else
+static int mt7603_mac80211_config(struct ieee80211_hw *hw, u32 changed)
+#endif
 {
     struct mt7603u_dev *dev = hw->priv;
 
@@ -645,7 +666,11 @@ static void mt7603_mac80211_configure_filter(struct ieee80211_hw *hw,
     }
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_bss_conf *info, u64 changed)
+#else
+static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee80211_bss_conf *info, u32 changed)
+#endif
 {
     struct mt7603u_dev *dev = hw->priv;
     struct reg_write_op ops[32];
@@ -653,9 +678,15 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
     int ret;
     const u8 *bssid = info ? info->bssid : NULL;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     pr_info("mt7603u: bss_info_changed: changed=0x%llx bssid=%pM assoc=%d\n",
-            changed, bssid, vif ? vif->cfg.assoc : -1);
+            (unsigned long long)changed, bssid, vif ? vif->cfg.assoc : -1);
+#else
+    pr_info("mt7603u: bss_info_changed: changed=0x%x bssid=%pM assoc=%d\n",
+            changed, bssid, vif ? vif->bss_conf.assoc : -1);
+#endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
     if (info && info->chanreq.oper.chan) {
         u8 ch = info->chanreq.oper.chan->hw_value;
         if (ch != dev->current_channel) {
@@ -664,6 +695,16 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
             mt7603_set_channel(dev, ch);
         }
     }
+#else
+    if (info && info->chandef.chan) {
+        u8 ch = info->chandef.chan->hw_value;
+        if (ch != dev->current_channel) {
+            pr_info("mt7603u: bss_info_changed: tuning to chandef channel %d (%d MHz)\n",
+                    ch, info->chandef.chan->center_freq);
+            mt7603_set_channel(dev, ch);
+        }
+    }
+#endif
 
     if (changed & (BSS_CHANGED_BEACON | BSS_CHANGED_BEACON_ENABLED | BSS_CHANGED_BEACON_INT)) {
         pr_info("mt7603u: AP beacon state changed (enabled=%d int=%u)\n",
@@ -705,7 +746,11 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
         }
     }
     if (changed & (BSS_CHANGED_BSSID | BSS_CHANGED_ASSOC)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
         pr_info("mt7603u: BSSID/ASSOC changed to %pM (assoc=%d)\n", bssid, vif ? vif->cfg.assoc : -1);
+#else
+        pr_info("mt7603u: BSSID/ASSOC changed to %pM (assoc=%d)\n", bssid, vif ? vif->bss_conf.assoc : -1);
+#endif
         if (bssid && !is_zero_ether_addr(bssid)) {
             struct cfg80211_bss *bss_entry = cfg80211_get_bss(hw->wiphy, NULL, bssid, NULL, 0,
                                                                IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
@@ -716,6 +761,7 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
                     mt7603_set_channel(dev, bss_entry->channel->hw_value);
                 }
                 cfg80211_put_bss(hw->wiphy, bss_entry);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
             } else if (info && info->bss && info->bss->channel) {
                 u8 ch = info->bss->channel->hw_value;
                 if (ch != dev->current_channel) {
@@ -731,6 +777,23 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
                     mt7603_set_channel(dev, ch);
                 }
             }
+#else
+            } else if (info && info->chandef.chan) {
+                u8 ch = info->chandef.chan->hw_value;
+                if (ch != dev->current_channel) {
+                    pr_info("mt7603u: bss_info_changed: tuning to channel %d (%d MHz)\n",
+                            ch, info->chandef.chan->center_freq);
+                    mt7603_set_channel(dev, ch);
+                }
+            } else if (vif && vif->bss_conf.chandef.chan) {
+                u8 ch = vif->bss_conf.chandef.chan->hw_value;
+                if (ch != dev->current_channel) {
+                    pr_info("mt7603u: bss_info_changed: tuning to vif channel %d (%d MHz)\n",
+                            ch, vif->bss_conf.chandef.chan->center_freq);
+                    mt7603_set_channel(dev, ch);
+                }
+            }
+#endif
 
             u32 lo = (u32)bssid[0] | ((u32)bssid[1] << 8) |
                      ((u32)bssid[2] << 16) | ((u32)bssid[3] << 24);
@@ -1051,6 +1114,7 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
                 mt7603_set_channel(dev, bss_entry->channel->hw_value);
             }
             cfg80211_put_bss(hw->wiphy, bss_entry);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
         } else if (vif && vif->bss_conf.bss && vif->bss_conf.bss->channel) {
             u8 ch = vif->bss_conf.bss->channel->hw_value;
             if (ch != dev->current_channel) {
@@ -1059,6 +1123,16 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
                 mt7603_set_channel(dev, ch);
             }
         }
+#else
+        } else if (vif && vif->bss_conf.chandef.chan) {
+            u8 ch = vif->bss_conf.chandef.chan->hw_value;
+            if (ch != dev->current_channel) {
+                pr_info("mt7603u: sta_add: tuning to channel %d (%d MHz)\n",
+                        ch, vif->bss_conf.chandef.chan->center_freq);
+                mt7603_set_channel(dev, ch);
+            }
+        }
+#endif
     }
 
     if (sta && !is_zero_ether_addr(sta->addr)) {
@@ -1199,7 +1273,11 @@ static int mt7603_mac80211_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd
     return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 static int mt7603_mac80211_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif, unsigned int link_id, u16 ac, const struct ieee80211_tx_queue_params *params)
+#else
+static int mt7603_mac80211_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif, u16 ac, const struct ieee80211_tx_queue_params *params)
+#endif
 {
     return 0;
 }
@@ -1276,11 +1354,13 @@ const struct ieee80211_ops mt7603_mac80211_ops = {
     .sw_scan_complete   = mt7603_mac80211_sw_scan_complete,
     .ampdu_action       = mt7603_mac80211_ampdu_action,
     .sta_rate_tbl_update = mt7603_mac80211_sta_rate_tbl_update,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     .wake_tx_queue      = ieee80211_handle_wake_tx_queue,
     /* Required chanctx emulation for single-channel devices */
     .add_chanctx        = ieee80211_emulate_add_chanctx,
     .remove_chanctx     = ieee80211_emulate_remove_chanctx,
     .change_chanctx     = ieee80211_emulate_change_chanctx,
+#endif
 };
 
 static struct ieee80211_channel mt7603_channels_2ghz[] = {

@@ -66,14 +66,23 @@ For detailed technical designs, see [RFC-0001: Architecture](docs/rfcs/0001-arch
 
 ---
 
-## 📡 Supported Hardware
+## 📡 Supported Hardware & Tested Platforms
+
+### Supported Chipset & USB IDs
 
 | Property | Value |
 |---|---|
 | **Chipset** | MediaTek MT7603U (802.11b/g/n, 2T2R, 2.4 GHz) |
 | **Supported USB IDs** | `0x0E8D:0x7603`, `0x0E8D:0x760C` |
-| **Host Interface** | USB 2.0 High-Speed |
-| **Target Kernels** | Linux 5.x / 6.x / 7.x (tested on 7.0.x) |
+| **Host Interface** | USB 2.0 High-Speed (480 Mbps) |
+| **Target Kernels** | Linux 5.10 LTS through Linux 7.x (tested on 5.10.4 and 7.0.x) |
+
+### Verified Target Platforms
+
+| Platform / Board | Architecture | Kernel & Environment | Validated Capabilities |
+|---|---|---|---|
+| **x86_64 Host PC** | x86_64 | Linux 7.0.0-generic (glibc) | • 802.11n 2T2R 300 Mbps MIMO<br>• STA mode (WPA2-PSK, DHCPv4, Ping)<br>• AP mode (`hostapd`, TBTT, Beacon)<br>• Monitor mode & Radiotap capture |
+| **Milk-V Duo S** (SG2000) | RISC-V 64 (`rv64imac`) | Linux 5.10.4-tag- (musl libc) | • USB Host enumeration (`0e8d:760c`)<br>• Andes N9 firmware loading<br>• Ch 1–13 active scan & RSSI reporting<br>• AP mode Beacon broadcasting (`AP-ENABLED`)<br>• Monitor mode promiscuous sniffing<br>• STA Auth / Assoc / EAPOL DATA TX (`LMAC_TX_OK`) |
 
 ---
 
@@ -131,10 +140,31 @@ sudo cp harness/fixtures/mt7603u_e2.bin /lib/firmware/mt7603u.bin
 
 ### Building the Driver
 
+#### Native Build (x86_64)
+
 Compile both the Rust static library and the Linux kernel module:
 
 ```bash
 make
+```
+
+#### Cross-Compiling for Embedded RISC-V (Milk-V Duo S / SG2000)
+
+```bash
+# 1. Install RISC-V soft-float no_std target matching kernel lp64 ABI
+rustup target add riscv64imac-unknown-none-elf
+
+# 2. Build Rust logic engine
+cd src/rust && cargo build --release --target riscv64imac-unknown-none-elf && cd ../..
+
+# 3. Link static object and strip debug/extended ISA attributes
+rust-lld -flavor gnu -r --gc-sections --whole-archive \
+    src/rust/target/riscv64imac-unknown-none-elf/release/libmt7603u_logic.a -o src/c/rust_logic.o
+llvm-objcopy --strip-debug -R .riscv.attributes -R .llvmbc -R .llvmcmd src/c/rust_logic.o
+
+# 4. Compile kernel module against Duo S Linux 5.10 build tree
+make -C <DUO_SDK>/linux_5.10/build/sg2000_milkv_duos_musl_riscv64_emmc \
+    M=$(pwd) ARCH=riscv CROSS_COMPILE=riscv64-unknown-linux-musl- modules
 ```
 
 ### Loading the Driver
