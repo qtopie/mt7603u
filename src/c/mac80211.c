@@ -2,7 +2,7 @@
 #include <linux/usb.h>
 #include <linux/slab.h>
 #include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #include <linux/unaligned.h>
 #else
 #include <asm/unaligned.h>
@@ -532,7 +532,7 @@ static int mt7603_mac80211_start(struct ieee80211_hw *hw)
     return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
 static void mt7603_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
 {
     struct mt7603u_dev *dev = hw->priv;
@@ -619,7 +619,7 @@ static void mt7603_mac80211_remove_interface(struct ieee80211_hw *hw, struct iee
     }
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
 static int mt7603_mac80211_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 #else
 static int mt7603_mac80211_config(struct ieee80211_hw *hw, u32 changed)
@@ -761,7 +761,7 @@ static void mt7603_mac80211_bss_info_changed(struct ieee80211_hw *hw, struct iee
                     mt7603_set_channel(dev, bss_entry->channel->hw_value);
                 }
                 cfg80211_put_bss(hw->wiphy, bss_entry);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
             } else if (info && info->bss && info->bss->channel) {
                 u8 ch = info->bss->channel->hw_value;
                 if (ch != dev->current_channel) {
@@ -1114,7 +1114,7 @@ static int mt7603_mac80211_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif
                 mt7603_set_channel(dev, bss_entry->channel->hw_value);
             }
             cfg80211_put_bss(hw->wiphy, bss_entry);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
         } else if (vif && vif->bss_conf.bss && vif->bss_conf.bss->channel) {
             u8 ch = vif->bss_conf.bss->channel->hw_value;
             if (ch != dev->current_channel) {
@@ -1356,6 +1356,8 @@ const struct ieee80211_ops mt7603_mac80211_ops = {
     .sta_rate_tbl_update = mt7603_mac80211_sta_rate_tbl_update,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     .wake_tx_queue      = ieee80211_handle_wake_tx_queue,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
     /* Required chanctx emulation for single-channel devices */
     .add_chanctx        = ieee80211_emulate_add_chanctx,
     .remove_chanctx     = ieee80211_emulate_remove_chanctx,

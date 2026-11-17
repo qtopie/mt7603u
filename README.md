@@ -75,7 +75,7 @@ For detailed technical designs, see [RFC-0001: Architecture](docs/rfcs/0001-arch
 | **Chipset** | MediaTek MT7603U (802.11b/g/n, 2T2R, 2.4 GHz) |
 | **Supported USB IDs** | `0x0E8D:0x7603`, `0x0E8D:0x760C` |
 | **Host Interface** | USB 2.0 High-Speed (480 Mbps) |
-| **Target Kernels** | Linux 5.10 LTS through Linux 7.x (tested on 5.10.4 and 7.0.x) |
+| **Target Kernels** | Linux 5.10 LTS through Linux 7.x (tested on 5.10.4, 6.6.63, and 7.0.x) |
 
 ### Verified Target Platforms
 
@@ -83,6 +83,7 @@ For detailed technical designs, see [RFC-0001: Architecture](docs/rfcs/0001-arch
 |---|---|---|---|
 | **x86_64 Host PC** | x86_64 | Linux 7.0.0-generic (glibc) | • 802.11n 2T2R 300 Mbps MIMO<br>• STA mode (WPA2-PSK, DHCPv4, Ping)<br>• AP mode (`hostapd`, TBTT, Beacon)<br>• Monitor mode & Radiotap capture |
 | **Milk-V Duo S** (SG2000) | RISC-V 64 (`rv64imac`) | Linux 5.10.4-tag- (musl libc) | • USB Host enumeration (`0e8d:760c`)<br>• Andes N9 firmware loading<br>• Ch 1–13 active scan & RSSI reporting<br>• AP mode Beacon broadcasting (`AP-ENABLED`)<br>• Monitor mode promiscuous sniffing<br>• STA Auth / Assoc / EAPOL DATA TX (`LMAC_TX_OK`) |
+| **Milk-V Jupiter** (SpacemiT K1) | RISC-V 64 (`rv64imac`) | Linux 6.6.63 (Ubuntu / glibc) | • USB Host enumeration (`0e8d:760c`), Andes N9 firmware & warm reload<br>• STA mode: Ch 1–13 scan, RSSI, WPA2-PSK CCMP, ICMP Ping (0% loss)<br>• AP mode: `hostapd` (`AP-ENABLED`, WPA2-PSK CCMP)<br>• Monitor mode: Radiotap capture via `tcpdump` (0% drop) |
 
 ---
 
